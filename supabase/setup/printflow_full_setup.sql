@@ -1,0 +1,4429 @@
+-- PrintFlow: complete database setup for a NEW, EMPTY Supabase project.
+-- Paste this whole file into Supabase → SQL Editor → New query, then click Run. Run it ONCE.
+-- It contains all 10 migrations from supabase/migrations, in order, inside one transaction:
+-- if anything fails, nothing is changed. It also records the migrations so that
+-- 'npx supabase db push' later knows they are already applied.
+
+begin;
+
+-- ============================================================
+-- 20261118000001_core_schema.sql
+-- ============================================================
+-- =============================================================================
+-- PrintFlow — core schema
+-- -----------------------------------------------------------------------------
+-- Conventions
+--   * UUID primary keys (gen_random_uuid()).
+--   * created_at / updated_at on every mutable table (updated_at via trigger).
+--   * Marketplace-owned columns are kept separate from internal production
+--     columns so marketplace re-syncs never overwrite internal work.
+--   * `is_sample` marks development sample data so it can be identified in the
+--     UI and purged without touching real business records.
+-- =============================================================================
+
+create extension if not exists pgcrypto;
+create extension if not exists pg_trgm;
+
+-- -----------------------------------------------------------------------------
+-- Enumerated types
+-- -----------------------------------------------------------------------------
+create type public.user_role as enum ('owner', 'admin', 'staff', 'viewer');
+create type public.order_source as enum ('etsy', 'shopify', 'manual');
+create type public.payment_status as enum (
+  'pending', 'paid', 'partially_paid', 'partially_refunded', 'refunded', 'voided', 'unknown'
+);
+-- Internal operational status of an order (not the marketplace's status).
+create type public.order_status as enum (
+  'new', 'in_production', 'ready_to_pack', 'packed', 'dispatched', 'completed', 'on_hold', 'cancelled'
+);
+create type public.production_stage as enum (
+  'new_order', 'awaiting_preparation', 'ready_to_print', 'printing', 'quality_check',
+  'ready_to_pack', 'dispatched', 'completed', 'on_hold'
+);
+create type public.priority_level as enum ('low', 'normal', 'high', 'urgent');
+create type public.printer_status as enum ('available', 'printing', 'paused', 'maintenance', 'offline');
+create type public.print_run_status as enum ('printing', 'succeeded', 'failed', 'cancelled');
+create type public.queue_status as enum ('queued', 'active', 'done', 'removed');
+create type public.integration_provider as enum ('etsy', 'shopify');
+create type public.integration_status as enum ('not_connected', 'connected', 'error', 'disabled');
+create type public.sync_trigger as enum ('scheduled', 'manual', 'initial', 'webhook');
+create type public.sync_status as enum ('running', 'success', 'partial', 'failed');
+create type public.shipment_status as enum ('pending', 'packed', 'dispatched', 'delivered', 'returned', 'cancelled');
+create type public.marketplace_push_status as enum ('not_required', 'pending', 'sent', 'failed');
+create type public.filament_usage_kind as enum ('print', 'failed_print', 'adjustment', 'waste');
+
+-- -----------------------------------------------------------------------------
+-- Shared trigger: maintain updated_at
+-- -----------------------------------------------------------------------------
+create or replace function public.set_updated_at()
+returns trigger
+language plpgsql
+as $$
+begin
+  new.updated_at := now();
+  return new;
+end;
+$$;
+
+-- -----------------------------------------------------------------------------
+-- profiles — one row per auth user
+-- -----------------------------------------------------------------------------
+create table public.profiles (
+  id uuid primary key references auth.users (id) on delete cascade,
+  email text not null,
+  full_name text,
+  role public.user_role not null default 'staff',
+  -- New accounts (other than the first owner) start inactive and must be
+  -- approved by an owner/admin before they can see any business data.
+  is_active boolean not null default false,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create index profiles_email_idx on public.profiles (lower(email));
+
+-- -----------------------------------------------------------------------------
+-- business_settings — single row of business-wide configuration
+-- -----------------------------------------------------------------------------
+create table public.business_settings (
+  id uuid primary key default gen_random_uuid(),
+  singleton boolean not null default true unique check (singleton),
+  business_name text not null default 'My Print Business',
+  currency char(3) not null default 'GBP',
+  timezone text not null default 'Europe/London',
+  default_dispatch_days integer not null default 3 check (default_dispatch_days between 0 and 60),
+  -- Cost assumptions used ONLY for *estimated* profit. Never accounting truth.
+  etsy_fee_percent numeric(6,3) not null default 9.5 check (etsy_fee_percent >= 0),
+  etsy_fixed_fee numeric(10,2) not null default 0.45 check (etsy_fixed_fee >= 0),
+  shopify_fee_percent numeric(6,3) not null default 2.2 check (shopify_fee_percent >= 0),
+  shopify_fixed_fee numeric(10,2) not null default 0.20 check (shopify_fixed_fee >= 0),
+  default_packaging_cost numeric(10,2) not null default 0.50 check (default_packaging_cost >= 0),
+  default_filament_cost_per_kg numeric(10,2) not null default 18.00 check (default_filament_cost_per_kg >= 0),
+  packing_checklist text[] not null default array[
+    'Items match order and quantities',
+    'Personalisation checked',
+    'Quality inspected',
+    'Protective packaging added',
+    'Shipping label attached'
+  ],
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+-- -----------------------------------------------------------------------------
+-- customers — unified customer records across marketplaces
+-- -----------------------------------------------------------------------------
+create table public.customers (
+  id uuid primary key default gen_random_uuid(),
+  display_name text not null,
+  email text,
+  phone text,
+  notes text,
+  first_source public.order_source,
+  is_sample boolean not null default false,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create index customers_email_idx on public.customers (lower(email)) where email is not null;
+create index customers_name_trgm_idx on public.customers using gin (display_name gin_trgm_ops);
+
+-- A customer may have several marketplace identities. Matching is ONLY by
+-- marketplace customer id or exact email — never by name alone.
+create table public.customer_identities (
+  id uuid primary key default gen_random_uuid(),
+  customer_id uuid not null references public.customers (id) on delete cascade,
+  source public.order_source not null,
+  external_customer_id text not null,
+  created_at timestamptz not null default now(),
+  unique (source, external_customer_id)
+);
+create index customer_identities_customer_idx on public.customer_identities (customer_id);
+
+create table public.customer_addresses (
+  id uuid primary key default gen_random_uuid(),
+  customer_id uuid not null references public.customers (id) on delete cascade,
+  name text,
+  line1 text,
+  line2 text,
+  city text,
+  region text,
+  postal_code text,
+  country_code text,
+  phone text,
+  -- Deterministic fingerprint so the same address is not stored twice.
+  fingerprint text generated always as (
+    lower(regexp_replace(
+      coalesce(line1, '') || '|' || coalesce(postal_code, '') || '|' || coalesce(country_code, ''),
+      '\s+', '', 'g'
+    ))
+  ) stored,
+  last_used_at timestamptz not null default now(),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (customer_id, fingerprint)
+);
+
+-- -----------------------------------------------------------------------------
+-- printers
+-- -----------------------------------------------------------------------------
+create table public.printers (
+  id uuid primary key default gen_random_uuid(),
+  name text not null,
+  manufacturer text not null,
+  model text not null,
+  printer_type text not null default 'FDM',
+  build_volume_x_mm integer check (build_volume_x_mm > 0),
+  build_volume_y_mm integer check (build_volume_y_mm > 0),
+  build_volume_z_mm integer check (build_volume_z_mm > 0),
+  nozzle_size_mm numeric(4,2) default 0.4 check (nozzle_size_mm > 0),
+  supported_materials text[] not null default array['PLA', 'PLA+', 'PETG'],
+  has_multi_material boolean not null default false,
+  status public.printer_status not null default 'available',
+  current_job_id uuid,          -- FK added after production_jobs exists
+  current_print_run_id uuid,    -- FK added after print_runs exists
+  estimated_completion_at timestamptz,
+  maintenance_notes text,
+  -- Live monitoring is NOT implemented. This flag documents that statuses are
+  -- set manually by staff until a real printer integration exists.
+  monitoring_source text not null default 'manual' check (monitoring_source in ('manual')),
+  is_active boolean not null default true,
+  sort_order integer not null default 0,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+-- -----------------------------------------------------------------------------
+-- filament_stock
+-- -----------------------------------------------------------------------------
+create table public.filament_stock (
+  id uuid primary key default gen_random_uuid(),
+  brand text not null,
+  material text not null,             -- PLA, PLA+, PETG, ... (free text for future materials)
+  colour text not null,
+  colour_hex text check (colour_hex is null or colour_hex ~ '^#[0-9A-Fa-f]{6}$'),
+  spool_weight_g integer not null check (spool_weight_g > 0),
+  remaining_g numeric(10,1) not null check (remaining_g >= 0),
+  purchase_price numeric(10,2) check (purchase_price >= 0),
+  supplier text,
+  purchase_date date,
+  low_stock_threshold_g integer not null default 200 check (low_stock_threshold_g >= 0),
+  notes text,
+  is_archived boolean not null default false,
+  is_sample boolean not null default false,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create index filament_stock_material_idx on public.filament_stock (material, colour);
+
+-- -----------------------------------------------------------------------------
+-- products & marketplace listings
+-- -----------------------------------------------------------------------------
+create table public.products (
+  id uuid primary key default gen_random_uuid(),
+  name text not null,
+  sku text not null,
+  description text,
+  category text,
+  image_path text,                     -- Supabase Storage path in product-images bucket
+  model_file_ref text,                 -- STL/3MF reference (storage path or external URL)
+  estimated_print_minutes integer check (estimated_print_minutes >= 0),
+  material text,
+  default_colour text,
+  estimated_filament_g numeric(10,1) check (estimated_filament_g >= 0),
+  default_printer_id uuid references public.printers (id) on delete set null,
+  production_instructions text,
+  base_price numeric(10,2) check (base_price >= 0),
+  material_cost numeric(10,2) check (material_cost >= 0),      -- override; else estimated from grams
+  packaging_cost numeric(10,2) check (packaging_cost >= 0),
+  labour_cost numeric(10,2) check (labour_cost >= 0),
+  other_cost numeric(10,2) check (other_cost >= 0),
+  is_active boolean not null default true,
+  is_sample boolean not null default false,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create unique index products_sku_key on public.products (lower(sku));
+create index products_name_trgm_idx on public.products using gin (name gin_trgm_ops);
+
+-- Etsy listing IDs and Shopify product/variant IDs are NOT interchangeable,
+-- so each listing is its own row keyed by (source, listing, variant).
+create table public.product_listings (
+  id uuid primary key default gen_random_uuid(),
+  product_id uuid not null references public.products (id) on delete cascade,
+  source public.integration_provider not null,
+  external_listing_id text not null,   -- Etsy listing_id / Shopify product GID
+  external_variant_id text,            -- Etsy product_id / Shopify variant GID
+  external_sku text,
+  title text,
+  url text,
+  is_active boolean not null default true,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique nulls not distinct (source, external_listing_id, external_variant_id)
+);
+create index product_listings_product_idx on public.product_listings (product_id);
+
+-- -----------------------------------------------------------------------------
+-- orders
+-- -----------------------------------------------------------------------------
+create sequence public.order_number_seq start 1001;
+
+create table public.orders (
+  id uuid primary key default gen_random_uuid(),
+  order_number text not null unique default ('PF-' || nextval('public.order_number_seq')::text),
+  source public.order_source not null,
+  external_order_id text,              -- marketplace receipt/order id (null for manual)
+  external_order_number text,          -- human-facing marketplace number, e.g. Shopify "#1042"
+  customer_id uuid references public.customers (id) on delete set null,
+
+  -- Marketplace-owned snapshot (overwritten on sync)
+  customer_name text not null,
+  customer_email text,
+  shipping_address jsonb not null default '{}'::jsonb,
+  order_date timestamptz not null default now(),
+  payment_status public.payment_status not null default 'unknown',
+  marketplace_status text,             -- raw status string from the marketplace
+  marketplace_fulfilment_status text,
+  currency char(3) not null default 'GBP',
+  subtotal numeric(12,2) not null default 0,
+  shipping_total numeric(12,2) not null default 0,
+  tax_total numeric(12,2) not null default 0,
+  discount_total numeric(12,2) not null default 0,
+  total numeric(12,2) not null default 0,
+  customer_note text,
+  shipping_method text,
+  marketplace_dispatch_by timestamptz, -- deadline as supplied by the marketplace
+  marketplace_updated_at timestamptz,
+  marketplace_cancelled_at timestamptz,
+  last_synced_at timestamptz,
+
+  -- Internal (never overwritten by sync)
+  status public.order_status not null default 'new',
+  priority public.priority_level not null default 'normal',
+  dispatch_by timestamptz,             -- working deadline (defaults from marketplace)
+  production_notes text,
+  tracking_number text,
+  carrier text,
+  dispatched_at timestamptz,
+  completed_at timestamptz,
+  is_sample boolean not null default false,
+  created_by uuid references public.profiles (id) on delete set null,
+
+  search_text text generated always as (
+    lower(
+      order_number || ' ' || coalesce(external_order_id, '') || ' ' ||
+      coalesce(external_order_number, '') || ' ' || customer_name || ' ' ||
+      coalesce(customer_email, '') || ' ' || coalesce(tracking_number, '')
+    )
+  ) stored,
+
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+
+  -- Duplicate prevention: one row per marketplace order.
+  constraint orders_source_external_key unique (source, external_order_id),
+  constraint orders_external_id_required check (source = 'manual' or external_order_id is not null),
+  constraint orders_totals_non_negative check (subtotal >= 0 and shipping_total >= 0 and tax_total >= 0 and discount_total >= 0 and total >= 0)
+);
+create index orders_status_idx on public.orders (status);
+create index orders_order_date_idx on public.orders (order_date desc);
+create index orders_dispatch_by_idx on public.orders (dispatch_by) where status not in ('dispatched', 'completed', 'cancelled');
+create index orders_customer_idx on public.orders (customer_id);
+create index orders_source_idx on public.orders (source, order_date desc);
+create index orders_search_trgm_idx on public.orders using gin (search_text gin_trgm_ops);
+
+create table public.order_items (
+  id uuid primary key default gen_random_uuid(),
+  order_id uuid not null references public.orders (id) on delete cascade,
+  product_id uuid references public.products (id) on delete set null,
+  external_line_item_id text,          -- Etsy transaction_id / Shopify line item GID
+  external_listing_id text,
+  external_variant_id text,
+  sku text,
+  title text not null,
+  variant_title text,
+  variant_details jsonb not null default '[]'::jsonb,  -- [{name, value}]
+  quantity integer not null check (quantity > 0),
+  unit_price numeric(12,2) not null default 0 check (unit_price >= 0),
+  total_price numeric(12,2) not null default 0 check (total_price >= 0),
+  personalisation text,
+  internal_notes text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique nulls distinct (order_id, external_line_item_id)
+);
+create index order_items_order_idx on public.order_items (order_id);
+create index order_items_product_idx on public.order_items (product_id);
+
+-- -----------------------------------------------------------------------------
+-- production
+-- -----------------------------------------------------------------------------
+create table public.production_jobs (
+  id uuid primary key default gen_random_uuid(),
+  job_number text not null unique default ('JOB-' || upper(substr(replace(gen_random_uuid()::text, '-', ''), 1, 8))),
+  order_id uuid not null references public.orders (id) on delete cascade,
+  order_item_id uuid not null references public.order_items (id) on delete cascade,
+  product_id uuid references public.products (id) on delete set null,
+  stage public.production_stage not null default 'new_order',
+  stage_before_hold public.production_stage,
+  priority public.priority_level not null default 'normal',
+  quantity integer not null check (quantity > 0),
+  printer_id uuid references public.printers (id) on delete set null,
+  estimated_print_minutes integer check (estimated_print_minutes >= 0),
+  material text,
+  colour text,
+  estimated_filament_g numeric(10,1) check (estimated_filament_g >= 0),
+  print_requirements text,
+  notes text,
+  due_date timestamptz,
+  attempt_count integer not null default 0,
+  failed_attempts integer not null default 0,
+  board_position double precision not null default extract(epoch from now()),
+  stage_changed_at timestamptz not null default now(),
+  started_at timestamptz,
+  completed_at timestamptz,
+  is_sample boolean not null default false,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  -- One job per order line. Reprints are print_runs, never new jobs/orders.
+  unique (order_item_id)
+);
+create index production_jobs_stage_idx on public.production_jobs (stage, board_position);
+create index production_jobs_order_idx on public.production_jobs (order_id);
+create index production_jobs_printer_idx on public.production_jobs (printer_id);
+
+create table public.print_queue (
+  id uuid primary key default gen_random_uuid(),
+  printer_id uuid not null references public.printers (id) on delete cascade,
+  production_job_id uuid not null references public.production_jobs (id) on delete cascade,
+  position double precision not null default extract(epoch from now()),
+  status public.queue_status not null default 'queued',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+-- A job can only be waiting in one queue at a time.
+create unique index print_queue_job_open_key on public.print_queue (production_job_id) where status in ('queued', 'active');
+create index print_queue_printer_idx on public.print_queue (printer_id, status, position);
+
+create table public.print_runs (
+  id uuid primary key default gen_random_uuid(),
+  production_job_id uuid not null references public.production_jobs (id) on delete cascade,
+  printer_id uuid references public.printers (id) on delete set null,
+  attempt_number integer not null default 1,
+  status public.print_run_status not null default 'printing',
+  quantity integer not null default 1 check (quantity > 0),
+  started_at timestamptz not null default now(),
+  ended_at timestamptz,
+  estimated_minutes integer,
+  failure_reason text,
+  notes text,
+  filament_recorded boolean not null default false,
+  started_by uuid references public.profiles (id) on delete set null,
+  ended_by uuid references public.profiles (id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  constraint print_runs_failure_reason check (status <> 'failed' or failure_reason is not null)
+);
+create index print_runs_job_idx on public.print_runs (production_job_id);
+create index print_runs_printer_idx on public.print_runs (printer_id, started_at desc);
+create index print_runs_status_idx on public.print_runs (status, started_at desc);
+
+alter table public.printers
+  add constraint printers_current_job_fk foreign key (current_job_id) references public.production_jobs (id) on delete set null,
+  add constraint printers_current_run_fk foreign key (current_print_run_id) references public.print_runs (id) on delete set null;
+
+-- Filament consumption ledger. Stock is only deducted when a row is recorded
+-- here — i.e. when actual consumption has been entered/confirmed by a person.
+create table public.filament_usage (
+  id uuid primary key default gen_random_uuid(),
+  filament_stock_id uuid not null references public.filament_stock (id) on delete cascade,
+  print_run_id uuid references public.print_runs (id) on delete set null,
+  production_job_id uuid references public.production_jobs (id) on delete set null,
+  kind public.filament_usage_kind not null default 'print',
+  grams numeric(10,1) not null check (grams <> 0),
+  cost numeric(10,2),
+  note text,
+  recorded_by uuid references public.profiles (id) on delete set null,
+  created_at timestamptz not null default now()
+);
+create index filament_usage_stock_idx on public.filament_usage (filament_stock_id, created_at desc);
+create index filament_usage_job_idx on public.filament_usage (production_job_id);
+
+-- -----------------------------------------------------------------------------
+-- shipments
+-- -----------------------------------------------------------------------------
+create table public.shipments (
+  id uuid primary key default gen_random_uuid(),
+  order_id uuid not null references public.orders (id) on delete cascade,
+  status public.shipment_status not null default 'pending',
+  carrier text,
+  shipping_method text,
+  tracking_number text,
+  tracking_url text,
+  packaging_notes text,
+  checklist jsonb not null default '[]'::jsonb,   -- [{label, done}]
+  shipping_cost numeric(10,2) check (shipping_cost >= 0),
+  packed_at timestamptz,
+  packed_by uuid references public.profiles (id) on delete set null,
+  dispatched_at timestamptz,
+  dispatched_by uuid references public.profiles (id) on delete set null,
+  -- Prepared for pushing fulfilment back to Etsy/Shopify.
+  marketplace_push_status public.marketplace_push_status not null default 'not_required',
+  marketplace_push_error text,
+  marketplace_pushed_at timestamptz,
+  external_fulfilment_id text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create index shipments_order_idx on public.shipments (order_id);
+create index shipments_status_idx on public.shipments (status, dispatched_at desc);
+
+-- -----------------------------------------------------------------------------
+-- integrations, credentials & sync logs
+-- -----------------------------------------------------------------------------
+create table public.integrations (
+  id uuid primary key default gen_random_uuid(),
+  provider public.integration_provider not null unique,
+  status public.integration_status not null default 'not_connected',
+  display_name text,
+  external_shop_id text,
+  shop_domain text,
+  scopes text[] not null default '{}',
+  connected_at timestamptz,
+  connected_by uuid references public.profiles (id) on delete set null,
+  sync_enabled boolean not null default true,
+  sync_interval_minutes integer not null default 10 check (sync_interval_minutes between 5 and 1440),
+  initial_import_days integer not null default 60 check (initial_import_days between 1 and 365),
+  sync_cursor timestamptz,             -- high-water mark of marketplace updated_at
+  last_sync_started_at timestamptz,
+  last_sync_finished_at timestamptz,
+  last_successful_sync_at timestamptz,
+  next_sync_at timestamptz,
+  sync_locked_until timestamptz,
+  consecutive_failures integer not null default 0,
+  last_error text,
+  last_error_at timestamptz,
+  settings jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+-- Secrets live in their own table. RLS is enabled with NO policies, so only
+-- the server-side service role can read/write it. Values are additionally
+-- encrypted by the application (AES-256-GCM) before storage.
+create table public.integration_credentials (
+  id uuid primary key default gen_random_uuid(),
+  integration_id uuid not null unique references public.integrations (id) on delete cascade,
+  access_token_encrypted text,
+  refresh_token_encrypted text,
+  access_token_expires_at timestamptz,
+  refresh_token_expires_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table public.sync_logs (
+  id uuid primary key default gen_random_uuid(),
+  integration_id uuid references public.integrations (id) on delete set null,
+  provider public.integration_provider not null,
+  trigger public.sync_trigger not null,
+  status public.sync_status not null default 'running',
+  started_at timestamptz not null default now(),
+  finished_at timestamptz,
+  duration_ms integer,
+  cursor_from timestamptz,
+  cursor_to timestamptz,
+  pages_fetched integer not null default 0,
+  orders_fetched integer not null default 0,
+  orders_created integer not null default 0,
+  orders_updated integer not null default 0,
+  orders_failed integer not null default 0,
+  error_message text,
+  error_details jsonb,
+  triggered_by uuid references public.profiles (id) on delete set null,
+  created_at timestamptz not null default now()
+);
+create index sync_logs_provider_idx on public.sync_logs (provider, started_at desc);
+
+-- -----------------------------------------------------------------------------
+-- notes & activity history
+-- -----------------------------------------------------------------------------
+create table public.internal_notes (
+  id uuid primary key default gen_random_uuid(),
+  entity_type text not null check (entity_type in ('order', 'customer', 'product', 'production_job', 'printer')),
+  entity_id uuid not null,
+  body text not null check (length(trim(body)) > 0),
+  author_id uuid references public.profiles (id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create index internal_notes_entity_idx on public.internal_notes (entity_type, entity_id, created_at desc);
+
+-- Append-only, audit-friendly activity history.
+create table public.activity_log (
+  id uuid primary key default gen_random_uuid(),
+  entity_type text not null,
+  entity_id uuid,
+  order_id uuid references public.orders (id) on delete cascade,
+  action text not null,
+  message text not null,
+  metadata jsonb not null default '{}'::jsonb,
+  actor_id uuid references public.profiles (id) on delete set null,
+  actor_label text,                    -- e.g. "Etsy sync" for system actions
+  created_at timestamptz not null default now()
+);
+create index activity_log_entity_idx on public.activity_log (entity_type, entity_id, created_at desc);
+create index activity_log_order_idx on public.activity_log (order_id, created_at desc);
+create index activity_log_created_idx on public.activity_log (created_at desc);
+
+-- -----------------------------------------------------------------------------
+-- updated_at triggers
+-- -----------------------------------------------------------------------------
+do $$
+declare
+  t text;
+begin
+  foreach t in array array[
+    'profiles', 'business_settings', 'customers', 'customer_addresses', 'printers',
+    'filament_stock', 'products', 'product_listings', 'orders', 'order_items',
+    'production_jobs', 'print_queue', 'print_runs', 'shipments', 'integrations',
+    'integration_credentials', 'internal_notes'
+  ]
+  loop
+    execute format(
+      'create trigger %I before update on public.%I for each row execute function public.set_updated_at()',
+      t || '_set_updated_at', t
+    );
+  end loop;
+end;
+$$;
+
+
+-- ============================================================
+-- 20261118000002_functions_and_triggers.sql
+-- ============================================================
+-- =============================================================================
+-- PrintFlow — business logic functions & triggers
+-- =============================================================================
+
+-- -----------------------------------------------------------------------------
+-- Auth helpers
+-- -----------------------------------------------------------------------------
+
+-- Role rank: owner 4 > admin 3 > staff 2 > viewer 1. Inactive / unknown = 0.
+create or replace function public.current_role_rank()
+returns integer
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select coalesce((
+    select case p.role
+      when 'owner' then 4
+      when 'admin' then 3
+      when 'staff' then 2
+      when 'viewer' then 1
+    end
+    from public.profiles p
+    where p.id = (select auth.uid()) and p.is_active
+  ), 0);
+$$;
+
+create or replace function public.is_team_member()
+returns boolean language sql stable security definer set search_path = ''
+as $$ select public.current_role_rank() >= 1; $$;
+
+create or replace function public.can_write()
+returns boolean language sql stable security definer set search_path = ''
+as $$ select public.current_role_rank() >= 2; $$;
+
+create or replace function public.is_admin()
+returns boolean language sql stable security definer set search_path = ''
+as $$ select public.current_role_rank() >= 3; $$;
+
+create or replace function public.assert_can_write()
+returns void language plpgsql stable as $$
+begin
+  if coalesce((select auth.role()), '') <> 'service_role' and not public.can_write() then
+    raise exception 'You do not have permission to perform this action' using errcode = '42501';
+  end if;
+end;
+$$;
+
+-- True until the first owner account exists. Exposed to anon so the login
+-- screen can offer "create owner account" on a brand-new installation only.
+create or replace function public.setup_required()
+returns boolean language sql stable security definer set search_path = ''
+as $$ select not exists (select 1 from public.profiles where role = 'owner'); $$;
+
+-- Create a profile for every new auth user. The very first user becomes the
+-- active owner; everyone after that is inactive until approved.
+create or replace function public.handle_new_user()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_first boolean;
+begin
+  perform pg_advisory_xact_lock(hashtext('printflow_profile_bootstrap'));
+  v_first := not exists (select 1 from public.profiles where role = 'owner');
+  insert into public.profiles (id, email, full_name, role, is_active)
+  values (
+    new.id,
+    coalesce(new.email, ''),
+    nullif(trim(coalesce(new.raw_user_meta_data ->> 'full_name', '')), ''),
+    case when v_first then 'owner'::public.user_role else 'staff'::public.user_role end,
+    v_first
+  );
+  return new;
+end;
+$$;
+
+create trigger on_auth_user_created
+  after insert on auth.users
+  for each row execute function public.handle_new_user();
+
+-- Prevent privilege escalation: only admins may change role / activation,
+-- and nobody may demote the last active owner.
+create or replace function public.guard_profile_update()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  if (new.role is distinct from old.role or new.is_active is distinct from old.is_active) then
+    if coalesce((select auth.role()), '') <> 'service_role' and not public.is_admin() then
+      raise exception 'Only owners and admins can change roles or account access';
+    end if;
+    if new.role = 'owner' and old.role <> 'owner'
+       and coalesce((select auth.role()), '') <> 'service_role'
+       and public.current_role_rank() < 4 then
+      raise exception 'Only an owner can grant the owner role';
+    end if;
+    if old.role = 'owner' and old.is_active and (new.role <> 'owner' or not new.is_active)
+       and not exists (
+         select 1 from public.profiles
+         where role = 'owner' and is_active and id <> old.id
+       ) then
+      raise exception 'Cannot remove the last active owner';
+    end if;
+  end if;
+  return new;
+end;
+$$;
+
+create trigger profiles_guard_update
+  before update on public.profiles
+  for each row execute function public.guard_profile_update();
+
+-- -----------------------------------------------------------------------------
+-- Activity log helper (security invoker; RLS applies)
+-- -----------------------------------------------------------------------------
+create or replace function public.log_activity(
+  p_entity_type text,
+  p_entity_id uuid,
+  p_order_id uuid,
+  p_action text,
+  p_message text,
+  p_metadata jsonb default '{}'::jsonb,
+  p_actor_label text default null
+)
+returns void
+language sql
+as $$
+  insert into public.activity_log (entity_type, entity_id, order_id, action, message, metadata, actor_id, actor_label)
+  values (p_entity_type, p_entity_id, p_order_id, p_action, p_message, coalesce(p_metadata, '{}'::jsonb),
+          (select auth.uid()), p_actor_label);
+$$;
+
+create or replace function public.stage_label(p public.production_stage)
+returns text language sql immutable
+as $$
+  select case p
+    when 'new_order' then 'New Order'
+    when 'awaiting_preparation' then 'Awaiting Preparation'
+    when 'ready_to_print' then 'Ready to Print'
+    when 'printing' then 'Printing'
+    when 'quality_check' then 'Quality Check'
+    when 'ready_to_pack' then 'Ready to Pack'
+    when 'dispatched' then 'Dispatched'
+    when 'completed' then 'Completed'
+    when 'on_hold' then 'On Hold'
+  end;
+$$;
+
+-- -----------------------------------------------------------------------------
+-- Order status derivation from production jobs
+-- -----------------------------------------------------------------------------
+create or replace function public.refresh_order_status(p_order_id uuid)
+returns void
+language plpgsql
+as $$
+declare
+  v_status public.order_status;
+  v_total integer;
+  v_ready integer;
+  v_progress integer;
+  v_new public.order_status;
+begin
+  select status into v_status from public.orders where id = p_order_id;
+  if v_status is null or v_status in ('cancelled', 'dispatched', 'completed', 'on_hold') then
+    return;
+  end if;
+
+  select
+    count(*),
+    count(*) filter (where stage in ('ready_to_pack', 'dispatched', 'completed')),
+    count(*) filter (where stage in ('awaiting_preparation', 'ready_to_print', 'printing', 'quality_check'))
+  into v_total, v_ready, v_progress
+  from public.production_jobs
+  where order_id = p_order_id;
+
+  if v_total = 0 then
+    return;
+  end if;
+
+  if v_ready = v_total then
+    v_new := case when v_status = 'packed' then 'packed'::public.order_status else 'ready_to_pack'::public.order_status end;
+  elsif v_progress > 0 or v_ready > 0 then
+    v_new := 'in_production';
+  else
+    v_new := 'new';
+  end if;
+
+  if v_new is distinct from v_status then
+    update public.orders set status = v_new where id = p_order_id;
+  end if;
+end;
+$$;
+
+create or replace function public.production_jobs_before_write()
+returns trigger
+language plpgsql
+as $$
+begin
+  if tg_op = 'UPDATE' and new.stage is distinct from old.stage then
+    new.stage_changed_at := now();
+    if new.stage = 'on_hold' and old.stage <> 'on_hold' then
+      new.stage_before_hold := old.stage;
+    end if;
+    if new.stage = 'printing' and new.started_at is null then
+      new.started_at := now();
+    end if;
+    if new.stage in ('ready_to_pack', 'dispatched', 'completed') and new.completed_at is null then
+      new.completed_at := now();
+    elsif new.stage not in ('ready_to_pack', 'dispatched', 'completed') then
+      new.completed_at := null;
+    end if;
+  end if;
+  return new;
+end;
+$$;
+
+create trigger production_jobs_before_write
+  before update on public.production_jobs
+  for each row execute function public.production_jobs_before_write();
+
+create or replace function public.production_jobs_after_write()
+returns trigger
+language plpgsql
+as $$
+begin
+  if tg_op = 'DELETE' then
+    perform public.refresh_order_status(old.order_id);
+    return old;
+  end if;
+
+  if tg_op = 'UPDATE' and new.stage is distinct from old.stage then
+    perform public.log_activity(
+      'production_job', new.id, new.order_id, 'job.stage_changed',
+      new.job_number || ': ' || public.stage_label(old.stage) || ' → ' || public.stage_label(new.stage),
+      jsonb_build_object('from', old.stage, 'to', new.stage)
+    );
+  end if;
+
+  if tg_op = 'INSERT' or new.stage is distinct from old.stage then
+    perform public.refresh_order_status(new.order_id);
+  end if;
+  return new;
+end;
+$$;
+
+create trigger production_jobs_after_write
+  after insert or update or delete on public.production_jobs
+  for each row execute function public.production_jobs_after_write();
+
+-- -----------------------------------------------------------------------------
+-- Filament ledger → stock deduction (only from explicitly recorded usage)
+-- -----------------------------------------------------------------------------
+create or replace function public.filament_usage_before_insert()
+returns trigger
+language plpgsql
+as $$
+declare
+  v_price numeric;
+  v_weight integer;
+begin
+  if new.cost is null then
+    select purchase_price, spool_weight_g into v_price, v_weight
+    from public.filament_stock where id = new.filament_stock_id;
+    if v_price is not null and v_weight > 0 then
+      new.cost := round((new.grams * v_price / v_weight)::numeric, 2);
+    end if;
+  end if;
+  new.recorded_by := coalesce(new.recorded_by, (select auth.uid()));
+  return new;
+end;
+$$;
+
+create trigger filament_usage_before_insert
+  before insert on public.filament_usage
+  for each row execute function public.filament_usage_before_insert();
+
+create or replace function public.filament_usage_after_insert()
+returns trigger
+language plpgsql
+as $$
+begin
+  update public.filament_stock
+  set remaining_g = greatest(0, remaining_g - new.grams)
+  where id = new.filament_stock_id;
+
+  if new.print_run_id is not null then
+    update public.print_runs set filament_recorded = true where id = new.print_run_id;
+  end if;
+  return new;
+end;
+$$;
+
+create trigger filament_usage_after_insert
+  after insert on public.filament_usage
+  for each row execute function public.filament_usage_after_insert();
+
+-- -----------------------------------------------------------------------------
+-- Marketplace order ingestion (used by the sync engine, service role only)
+-- -----------------------------------------------------------------------------
+-- Idempotent upsert keyed on (source, external_order_id).
+--   * Only marketplace-owned columns are overwritten on update.
+--   * Internal production data (status, priority, notes, jobs) is preserved.
+--   * Customers are matched by marketplace customer id, then exact email.
+--     Never by name.
+-- Returns {order_id, result: created|updated|unchanged}.
+create or replace function public.ingest_marketplace_order(
+  p_source public.order_source,
+  p_order jsonb,
+  p_items jsonb,
+  p_actor_label text default null
+)
+returns jsonb
+language plpgsql
+as $$
+declare
+  v_ext_id text := p_order ->> 'external_order_id';
+  v_existing record;
+  v_customer_id uuid;
+  v_ext_customer text := nullif(p_order #>> '{customer,external_id}', '');
+  v_email text := nullif(lower(trim(coalesce(p_order ->> 'customer_email', ''))), '');
+  v_name text := coalesce(nullif(trim(p_order ->> 'customer_name'), ''), 'Unknown customer');
+  v_addr jsonb := coalesce(p_order -> 'shipping_address', '{}'::jsonb);
+  v_mp_updated timestamptz := nullif(p_order ->> 'marketplace_updated_at', '')::timestamptz;
+  v_cancelled timestamptz := nullif(p_order ->> 'marketplace_cancelled_at', '')::timestamptz;
+  v_fulfilled boolean := coalesce((p_order ->> 'is_fulfilled')::boolean, false);
+  v_order_id uuid;
+  v_inserted boolean;
+  v_item jsonb;
+  v_product_id uuid;
+  v_status public.order_status;
+  v_listing_source public.integration_provider;
+begin
+  if p_source = 'manual' then
+    raise exception 'ingest_marketplace_order is for marketplace orders only';
+  end if;
+  if v_ext_id is null or v_ext_id = '' then
+    raise exception 'external_order_id is required';
+  end if;
+  v_listing_source := p_source::text::public.integration_provider;
+
+  select id, marketplace_updated_at, status, customer_id
+  into v_existing
+  from public.orders
+  where source = p_source and external_order_id = v_ext_id;
+
+  -- Skip untouched orders cheaply.
+  if v_existing.id is not null and v_mp_updated is not null
+     and v_existing.marketplace_updated_at is not null
+     and v_mp_updated <= v_existing.marketplace_updated_at then
+    update public.orders set last_synced_at = now() where id = v_existing.id;
+    return jsonb_build_object('order_id', v_existing.id, 'result', 'unchanged');
+  end if;
+
+  -- ---- Customer resolution -------------------------------------------------
+  v_customer_id := v_existing.customer_id;
+  if v_customer_id is null and v_ext_customer is not null then
+    select customer_id into v_customer_id
+    from public.customer_identities
+    where source = p_source and external_customer_id = v_ext_customer;
+  end if;
+  if v_customer_id is null and v_email is not null then
+    select id into v_customer_id
+    from public.customers
+    where lower(email) = v_email
+    order by created_at
+    limit 1;
+  end if;
+  if v_customer_id is null then
+    insert into public.customers (display_name, email, first_source)
+    values (v_name, v_email, p_source)
+    returning id into v_customer_id;
+  elsif v_email is not null then
+    update public.customers set email = coalesce(email, v_email) where id = v_customer_id;
+  end if;
+  if v_ext_customer is not null then
+    insert into public.customer_identities (customer_id, source, external_customer_id)
+    values (v_customer_id, p_source, v_ext_customer)
+    on conflict (source, external_customer_id) do nothing;
+  end if;
+  if coalesce(v_addr ->> 'line1', '') <> '' then
+    insert into public.customer_addresses (customer_id, name, line1, line2, city, region, postal_code, country_code, phone)
+    values (v_customer_id, v_addr ->> 'name', v_addr ->> 'line1', v_addr ->> 'line2', v_addr ->> 'city',
+            v_addr ->> 'region', v_addr ->> 'postal_code', v_addr ->> 'country_code', v_addr ->> 'phone')
+    on conflict (customer_id, fingerprint) do update set last_used_at = now();
+  end if;
+
+  -- ---- Order upsert ---------------------------------------------------------
+  v_status := case
+    when v_cancelled is not null then 'cancelled'::public.order_status
+    when v_fulfilled then 'completed'::public.order_status
+    else 'new'::public.order_status
+  end;
+
+  insert into public.orders (
+    source, external_order_id, external_order_number, customer_id, customer_name, customer_email,
+    shipping_address, order_date, payment_status, marketplace_status, marketplace_fulfilment_status,
+    currency, subtotal, shipping_total, tax_total, discount_total, total, customer_note,
+    shipping_method, marketplace_dispatch_by, marketplace_updated_at, marketplace_cancelled_at,
+    last_synced_at, status, dispatch_by, completed_at
+  ) values (
+    p_source, v_ext_id, p_order ->> 'external_order_number', v_customer_id, v_name, v_email,
+    v_addr, coalesce(nullif(p_order ->> 'order_date', '')::timestamptz, now()),
+    coalesce(nullif(p_order ->> 'payment_status', ''), 'unknown')::public.payment_status,
+    p_order ->> 'marketplace_status', p_order ->> 'marketplace_fulfilment_status',
+    coalesce(nullif(p_order ->> 'currency', ''), 'GBP'),
+    coalesce((p_order ->> 'subtotal')::numeric, 0), coalesce((p_order ->> 'shipping_total')::numeric, 0),
+    coalesce((p_order ->> 'tax_total')::numeric, 0), coalesce((p_order ->> 'discount_total')::numeric, 0),
+    coalesce((p_order ->> 'total')::numeric, 0), nullif(p_order ->> 'customer_note', ''),
+    nullif(p_order ->> 'shipping_method', ''), nullif(p_order ->> 'marketplace_dispatch_by', '')::timestamptz,
+    v_mp_updated, v_cancelled, now(), v_status,
+    coalesce(nullif(p_order ->> 'marketplace_dispatch_by', '')::timestamptz, nullif(p_order ->> 'default_dispatch_by', '')::timestamptz),
+    case when v_status = 'completed' then now() end
+  )
+  on conflict (source, external_order_id) do update set
+    external_order_number = excluded.external_order_number,
+    customer_id = coalesce(public.orders.customer_id, excluded.customer_id),
+    customer_name = excluded.customer_name,
+    customer_email = coalesce(excluded.customer_email, public.orders.customer_email),
+    shipping_address = excluded.shipping_address,
+    order_date = excluded.order_date,
+    payment_status = excluded.payment_status,
+    marketplace_status = excluded.marketplace_status,
+    marketplace_fulfilment_status = excluded.marketplace_fulfilment_status,
+    currency = excluded.currency,
+    subtotal = excluded.subtotal,
+    shipping_total = excluded.shipping_total,
+    tax_total = excluded.tax_total,
+    discount_total = excluded.discount_total,
+    total = excluded.total,
+    customer_note = excluded.customer_note,
+    shipping_method = excluded.shipping_method,
+    marketplace_dispatch_by = excluded.marketplace_dispatch_by,
+    marketplace_updated_at = excluded.marketplace_updated_at,
+    marketplace_cancelled_at = excluded.marketplace_cancelled_at,
+    last_synced_at = now(),
+    -- Internal working deadline is only filled if it was never set.
+    dispatch_by = coalesce(public.orders.dispatch_by, excluded.dispatch_by)
+  returning id, (xmax = 0) into v_order_id, v_inserted;
+
+  -- ---- Line items -----------------------------------------------------------
+  for v_item in select * from jsonb_array_elements(coalesce(p_items, '[]'::jsonb))
+  loop
+    v_product_id := null;
+    if nullif(v_item ->> 'external_listing_id', '') is not null then
+      select pl.product_id into v_product_id
+      from public.product_listings pl
+      where pl.source = v_listing_source
+        and pl.external_listing_id = v_item ->> 'external_listing_id'
+        and (pl.external_variant_id is null or pl.external_variant_id = v_item ->> 'external_variant_id')
+      order by (pl.external_variant_id is not null) desc
+      limit 1;
+    end if;
+    if v_product_id is null and nullif(v_item ->> 'sku', '') is not null then
+      select id into v_product_id from public.products where lower(sku) = lower(v_item ->> 'sku') limit 1;
+    end if;
+
+    insert into public.order_items (
+      order_id, product_id, external_line_item_id, external_listing_id, external_variant_id, sku,
+      title, variant_title, variant_details, quantity, unit_price, total_price, personalisation
+    ) values (
+      v_order_id, v_product_id, v_item ->> 'external_line_item_id', v_item ->> 'external_listing_id',
+      v_item ->> 'external_variant_id', nullif(v_item ->> 'sku', ''),
+      coalesce(nullif(v_item ->> 'title', ''), 'Untitled item'), nullif(v_item ->> 'variant_title', ''),
+      coalesce(v_item -> 'variant_details', '[]'::jsonb),
+      greatest(1, coalesce((v_item ->> 'quantity')::integer, 1)),
+      coalesce((v_item ->> 'unit_price')::numeric, 0), coalesce((v_item ->> 'total_price')::numeric, 0),
+      nullif(v_item ->> 'personalisation', '')
+    )
+    on conflict (order_id, external_line_item_id) do update set
+      external_listing_id = excluded.external_listing_id,
+      external_variant_id = excluded.external_variant_id,
+      sku = excluded.sku,
+      title = excluded.title,
+      variant_title = excluded.variant_title,
+      variant_details = excluded.variant_details,
+      quantity = excluded.quantity,
+      unit_price = excluded.unit_price,
+      total_price = excluded.total_price,
+      personalisation = excluded.personalisation,
+      -- Keep a manual product mapping if staff already set one.
+      product_id = coalesce(public.order_items.product_id, excluded.product_id);
+  end loop;
+
+  -- Keep quantities of not-yet-started jobs aligned with marketplace edits.
+  update public.production_jobs j
+  set quantity = oi.quantity
+  from public.order_items oi
+  where j.order_item_id = oi.id and oi.order_id = v_order_id
+    and j.quantity <> oi.quantity
+    and j.stage in ('new_order', 'awaiting_preparation', 'ready_to_print');
+
+  -- ---- Production jobs for new lines ------------------------------------------
+  if v_cancelled is null then
+    insert into public.production_jobs (
+      order_id, order_item_id, product_id, stage, priority, quantity, printer_id,
+      estimated_print_minutes, material, colour, estimated_filament_g, print_requirements, due_date
+    )
+    select
+      v_order_id, oi.id, oi.product_id,
+      case when v_inserted and v_fulfilled then 'completed'::public.production_stage else 'new_order'::public.production_stage end,
+      o.priority, oi.quantity, p.default_printer_id,
+      p.estimated_print_minutes * oi.quantity, p.material, p.default_colour,
+      p.estimated_filament_g * oi.quantity, p.production_instructions, o.dispatch_by
+    from public.order_items oi
+    join public.orders o on o.id = oi.order_id
+    left join public.products p on p.id = oi.product_id
+    left join public.production_jobs j on j.order_item_id = oi.id
+    where oi.order_id = v_order_id and j.id is null;
+  end if;
+
+  -- ---- Marketplace-driven status transitions (existing orders) --------------
+  if not v_inserted then
+    if v_cancelled is not null and v_existing.status not in ('cancelled', 'dispatched', 'completed') then
+      update public.orders set status = 'cancelled' where id = v_order_id;
+      perform public.log_activity('order', v_order_id, v_order_id, 'order.cancelled_on_marketplace',
+        'Order was cancelled on ' || initcap(p_source::text), '{}'::jsonb, p_actor_label);
+    elsif v_fulfilled and v_existing.status not in ('cancelled', 'dispatched', 'completed') then
+      update public.orders set status = 'dispatched', dispatched_at = coalesce(dispatched_at, now())
+      where id = v_order_id;
+      update public.production_jobs set stage = 'dispatched'
+      where order_id = v_order_id and stage not in ('dispatched', 'completed');
+      perform public.log_activity('order', v_order_id, v_order_id, 'order.fulfilled_on_marketplace',
+        'Order was marked as shipped on ' || initcap(p_source::text) || ' outside PrintFlow', '{}'::jsonb, p_actor_label);
+    end if;
+    perform public.log_activity('order', v_order_id, v_order_id, 'order.synced',
+      'Marketplace data updated from ' || initcap(p_source::text), '{}'::jsonb, p_actor_label);
+  else
+    perform public.log_activity('order', v_order_id, v_order_id, 'order.imported',
+      'Order imported from ' || initcap(p_source::text), jsonb_build_object('external_order_id', v_ext_id), p_actor_label);
+  end if;
+
+  return jsonb_build_object('order_id', v_order_id, 'result', case when v_inserted then 'created' else 'updated' end);
+end;
+$$;
+
+-- -----------------------------------------------------------------------------
+-- Manual order creation (security invoker → RLS applies to the caller)
+-- -----------------------------------------------------------------------------
+create or replace function public.create_manual_order(p_order jsonb, p_items jsonb)
+returns uuid
+language plpgsql
+as $$
+declare
+  v_order_id uuid;
+  v_customer_id uuid := nullif(p_order ->> 'customer_id', '')::uuid;
+  v_email text := nullif(lower(trim(coalesce(p_order ->> 'customer_email', ''))), '');
+  v_name text := trim(p_order ->> 'customer_name');
+  v_addr jsonb := coalesce(p_order -> 'shipping_address', '{}'::jsonb);
+  v_item jsonb;
+  v_subtotal numeric := 0;
+  v_is_sample boolean := coalesce((p_order ->> 'is_sample')::boolean, false);
+begin
+  perform public.assert_can_write();
+  if coalesce(v_name, '') = '' then
+    raise exception 'Customer name is required';
+  end if;
+  if jsonb_array_length(coalesce(p_items, '[]'::jsonb)) = 0 then
+    raise exception 'At least one item is required';
+  end if;
+
+  if v_customer_id is null and v_email is not null then
+    select id into v_customer_id from public.customers where lower(email) = v_email order by created_at limit 1;
+  end if;
+  if v_customer_id is null then
+    insert into public.customers (display_name, email, phone, first_source, is_sample)
+    values (v_name, v_email, nullif(p_order ->> 'customer_phone', ''), 'manual', v_is_sample)
+    returning id into v_customer_id;
+  end if;
+  if coalesce(v_addr ->> 'line1', '') <> '' then
+    insert into public.customer_addresses (customer_id, name, line1, line2, city, region, postal_code, country_code, phone)
+    values (v_customer_id, v_addr ->> 'name', v_addr ->> 'line1', v_addr ->> 'line2', v_addr ->> 'city',
+            v_addr ->> 'region', v_addr ->> 'postal_code', v_addr ->> 'country_code', v_addr ->> 'phone')
+    on conflict (customer_id, fingerprint) do update set last_used_at = now();
+  end if;
+
+  select coalesce(sum((i ->> 'quantity')::integer * (i ->> 'unit_price')::numeric), 0)
+  into v_subtotal
+  from jsonb_array_elements(p_items) i;
+
+  insert into public.orders (
+    source, external_order_number, customer_id, customer_name, customer_email, shipping_address,
+    order_date, payment_status, currency, subtotal, shipping_total, tax_total, discount_total, total,
+    customer_note, shipping_method, dispatch_by, priority, production_notes, is_sample, created_by
+  ) values (
+    'manual', nullif(p_order ->> 'external_order_number', ''), v_customer_id, v_name, v_email, v_addr,
+    coalesce(nullif(p_order ->> 'order_date', '')::timestamptz, now()),
+    coalesce(nullif(p_order ->> 'payment_status', ''), 'pending')::public.payment_status,
+    coalesce(nullif(p_order ->> 'currency', ''), (select currency from public.business_settings limit 1), 'GBP'),
+    v_subtotal, coalesce((p_order ->> 'shipping_total')::numeric, 0), 0,
+    coalesce((p_order ->> 'discount_total')::numeric, 0),
+    greatest(0, v_subtotal + coalesce((p_order ->> 'shipping_total')::numeric, 0) - coalesce((p_order ->> 'discount_total')::numeric, 0)),
+    nullif(p_order ->> 'customer_note', ''), nullif(p_order ->> 'shipping_method', ''),
+    nullif(p_order ->> 'dispatch_by', '')::timestamptz,
+    coalesce(nullif(p_order ->> 'priority', ''), 'normal')::public.priority_level,
+    nullif(p_order ->> 'production_notes', ''), v_is_sample, (select auth.uid())
+  ) returning id into v_order_id;
+
+  for v_item in select * from jsonb_array_elements(p_items)
+  loop
+    insert into public.order_items (
+      order_id, product_id, sku, title, variant_title, quantity, unit_price, total_price, personalisation
+    )
+    select
+      v_order_id, p.id, coalesce(nullif(v_item ->> 'sku', ''), p.sku),
+      coalesce(nullif(v_item ->> 'title', ''), p.name, 'Custom item'),
+      nullif(v_item ->> 'variant_title', ''),
+      (v_item ->> 'quantity')::integer, (v_item ->> 'unit_price')::numeric,
+      (v_item ->> 'quantity')::integer * (v_item ->> 'unit_price')::numeric,
+      nullif(v_item ->> 'personalisation', '')
+    from (select 1) dummy
+    left join public.products p on p.id = nullif(v_item ->> 'product_id', '')::uuid;
+  end loop;
+
+  insert into public.production_jobs (
+    order_id, order_item_id, product_id, priority, quantity, printer_id, estimated_print_minutes,
+    material, colour, estimated_filament_g, print_requirements, due_date, is_sample
+  )
+  select v_order_id, oi.id, oi.product_id, o.priority, oi.quantity, p.default_printer_id,
+         p.estimated_print_minutes * oi.quantity, p.material, p.default_colour,
+         p.estimated_filament_g * oi.quantity, p.production_instructions, o.dispatch_by, v_is_sample
+  from public.order_items oi
+  join public.orders o on o.id = oi.order_id
+  left join public.products p on p.id = oi.product_id
+  where oi.order_id = v_order_id;
+
+  perform public.log_activity('order', v_order_id, v_order_id, 'order.created', 'Manual order created');
+  return v_order_id;
+end;
+$$;
+
+-- -----------------------------------------------------------------------------
+-- Order hold / release
+-- -----------------------------------------------------------------------------
+create or replace function public.set_order_hold(p_order_id uuid, p_hold boolean, p_reason text default null)
+returns void
+language plpgsql
+as $$
+declare
+  v_status public.order_status;
+begin
+  perform public.assert_can_write();
+  select status into v_status from public.orders where id = p_order_id for update;
+  if v_status is null then raise exception 'Order not found'; end if;
+
+  if p_hold then
+    if v_status in ('dispatched', 'completed', 'cancelled') then
+      raise exception 'Order can no longer be put on hold';
+    end if;
+    update public.production_jobs set stage = 'on_hold'
+    where order_id = p_order_id and stage not in ('on_hold', 'dispatched', 'completed');
+    update public.orders set status = 'on_hold' where id = p_order_id;
+    perform public.log_activity('order', p_order_id, p_order_id, 'order.on_hold',
+      'Order put on hold' || coalesce(': ' || nullif(trim(p_reason), ''), ''));
+  else
+    if v_status <> 'on_hold' then return; end if;
+    update public.orders set status = 'new' where id = p_order_id;
+    update public.production_jobs set stage = coalesce(stage_before_hold, 'new_order'), stage_before_hold = null
+    where order_id = p_order_id and stage = 'on_hold';
+    perform public.refresh_order_status(p_order_id);
+    perform public.log_activity('order', p_order_id, p_order_id, 'order.released', 'Order released from hold');
+  end if;
+end;
+$$;
+
+-- -----------------------------------------------------------------------------
+-- Print farm workflow
+-- -----------------------------------------------------------------------------
+create or replace function public.assign_job_to_printer(p_job_id uuid, p_printer_id uuid)
+returns void
+language plpgsql
+as $$
+declare
+  v_job record;
+  v_printer_name text;
+begin
+  perform public.assert_can_write();
+  select id, order_id, job_number, stage into v_job from public.production_jobs where id = p_job_id for update;
+  if v_job.id is null then raise exception 'Production job not found'; end if;
+
+  update public.print_queue set status = 'removed'
+  where production_job_id = p_job_id and status = 'queued';
+
+  if p_printer_id is null then
+    update public.production_jobs set printer_id = null where id = p_job_id;
+    perform public.log_activity('production_job', p_job_id, v_job.order_id, 'job.unassigned',
+      v_job.job_number || ' unassigned from printer');
+    return;
+  end if;
+
+  select name into v_printer_name from public.printers where id = p_printer_id and is_active;
+  if v_printer_name is null then raise exception 'Printer not found'; end if;
+
+  update public.production_jobs set printer_id = p_printer_id where id = p_job_id;
+  if v_job.stage in ('new_order', 'awaiting_preparation', 'ready_to_print') then
+    insert into public.print_queue (printer_id, production_job_id) values (p_printer_id, p_job_id)
+    on conflict do nothing;
+  end if;
+  perform public.log_activity('production_job', p_job_id, v_job.order_id, 'job.assigned',
+    v_job.job_number || ' assigned to ' || v_printer_name);
+end;
+$$;
+
+create or replace function public.start_print_run(p_job_id uuid, p_printer_id uuid, p_quantity integer default null)
+returns uuid
+language plpgsql
+as $$
+declare
+  v_job record;
+  v_printer record;
+  v_run_id uuid;
+  v_minutes integer;
+begin
+  perform public.assert_can_write();
+  select * into v_job from public.production_jobs where id = p_job_id for update;
+  if v_job.id is null then raise exception 'Production job not found'; end if;
+  if v_job.stage in ('dispatched', 'completed', 'on_hold') then
+    raise exception 'Job is %, it cannot be printed', public.stage_label(v_job.stage);
+  end if;
+
+  select * into v_printer from public.printers where id = p_printer_id and is_active for update;
+  if v_printer.id is null then raise exception 'Printer not found'; end if;
+  if v_printer.status in ('printing', 'paused') and v_printer.current_print_run_id is not null then
+    raise exception '% is already running a print', v_printer.name;
+  end if;
+  if v_printer.status in ('maintenance', 'offline') then
+    raise exception '% is %', v_printer.name, v_printer.status;
+  end if;
+
+  v_minutes := v_job.estimated_print_minutes;
+
+  insert into public.print_runs (production_job_id, printer_id, attempt_number, quantity, estimated_minutes, started_by)
+  values (p_job_id, p_printer_id, v_job.attempt_count + 1, coalesce(p_quantity, v_job.quantity), v_minutes, (select auth.uid()))
+  returning id into v_run_id;
+
+  update public.production_jobs
+  set stage = 'printing', printer_id = p_printer_id, attempt_count = attempt_count + 1
+  where id = p_job_id;
+
+  update public.printers
+  set status = 'printing', current_job_id = p_job_id, current_print_run_id = v_run_id,
+      estimated_completion_at = case when v_minutes is not null then now() + make_interval(mins => v_minutes) end
+  where id = p_printer_id;
+
+  update public.print_queue set status = 'removed'
+  where production_job_id = p_job_id and status = 'queued' and printer_id <> p_printer_id;
+  update public.print_queue set status = 'active'
+  where production_job_id = p_job_id and status = 'queued' and printer_id = p_printer_id;
+  if not found then
+    insert into public.print_queue (printer_id, production_job_id, status) values (p_printer_id, p_job_id, 'active');
+  end if;
+
+  perform public.log_activity('production_job', p_job_id, v_job.order_id, 'print.started',
+    v_job.job_number || ' started on ' || v_printer.name || ' (attempt ' || (v_job.attempt_count + 1) || ')',
+    jsonb_build_object('print_run_id', v_run_id, 'printer_id', p_printer_id));
+  return v_run_id;
+end;
+$$;
+
+create or replace function public.finish_print_run(
+  p_run_id uuid,
+  p_succeeded boolean,
+  p_failure_reason text default null,
+  p_notes text default null,
+  p_requeue boolean default true
+)
+returns void
+language plpgsql
+as $$
+declare
+  v_run record;
+  v_job record;
+  v_printer_name text;
+begin
+  perform public.assert_can_write();
+  select * into v_run from public.print_runs where id = p_run_id for update;
+  if v_run.id is null then raise exception 'Print run not found'; end if;
+  if v_run.status <> 'printing' then raise exception 'This print run has already finished'; end if;
+  if not p_succeeded and coalesce(trim(p_failure_reason), '') = '' then
+    raise exception 'A failure reason is required';
+  end if;
+
+  select * into v_job from public.production_jobs where id = v_run.production_job_id for update;
+  select name into v_printer_name from public.printers where id = v_run.printer_id;
+
+  update public.print_runs
+  set status = case when p_succeeded then 'succeeded'::public.print_run_status else 'failed'::public.print_run_status end,
+      ended_at = now(),
+      failure_reason = case when p_succeeded then null else trim(p_failure_reason) end,
+      notes = coalesce(nullif(trim(p_notes), ''), notes),
+      ended_by = (select auth.uid())
+  where id = p_run_id;
+
+  update public.printers
+  set status = 'available', current_job_id = null, current_print_run_id = null, estimated_completion_at = null
+  where id = v_run.printer_id and current_print_run_id = p_run_id;
+
+  if p_succeeded then
+    update public.production_jobs set stage = 'quality_check' where id = v_job.id;
+    update public.print_queue set status = 'done'
+    where production_job_id = v_job.id and status = 'active';
+    perform public.log_activity('production_job', v_job.id, v_job.order_id, 'print.succeeded',
+      v_job.job_number || ' print completed on ' || coalesce(v_printer_name, 'printer'),
+      jsonb_build_object('print_run_id', p_run_id));
+  else
+    -- Reprint the same job: no duplicate order or job is created.
+    update public.production_jobs
+    set stage = 'ready_to_print', failed_attempts = failed_attempts + 1
+    where id = v_job.id;
+    if p_requeue and v_run.printer_id is not null then
+      update public.print_queue set status = 'queued', position = 0
+      where production_job_id = v_job.id and status = 'active';
+    else
+      update public.print_queue set status = 'removed'
+      where production_job_id = v_job.id and status = 'active';
+    end if;
+    perform public.log_activity('production_job', v_job.id, v_job.order_id, 'print.failed',
+      v_job.job_number || ' print failed on ' || coalesce(v_printer_name, 'printer') || ': ' || trim(p_failure_reason),
+      jsonb_build_object('print_run_id', p_run_id, 'reason', trim(p_failure_reason)));
+  end if;
+end;
+$$;
+
+-- -----------------------------------------------------------------------------
+-- Packing & dispatch
+-- -----------------------------------------------------------------------------
+create or replace function public.mark_order_packed(p_order_id uuid, p_checklist jsonb, p_packaging_notes text default null)
+returns uuid
+language plpgsql
+as $$
+declare
+  v_order record;
+  v_shipment_id uuid;
+begin
+  perform public.assert_can_write();
+  select * into v_order from public.orders where id = p_order_id for update;
+  if v_order.id is null then raise exception 'Order not found'; end if;
+  if v_order.status not in ('ready_to_pack', 'packed') then
+    raise exception 'Order is not ready to pack';
+  end if;
+
+  select id into v_shipment_id from public.shipments
+  where order_id = p_order_id and status in ('pending', 'packed')
+  order by created_at desc limit 1;
+
+  if v_shipment_id is null then
+    insert into public.shipments (order_id, status, shipping_method, checklist, packaging_notes, packed_at, packed_by)
+    values (p_order_id, 'packed', v_order.shipping_method, coalesce(p_checklist, '[]'::jsonb),
+            nullif(trim(p_packaging_notes), ''), now(), (select auth.uid()))
+    returning id into v_shipment_id;
+  else
+    update public.shipments
+    set status = 'packed', checklist = coalesce(p_checklist, checklist),
+        packaging_notes = coalesce(nullif(trim(p_packaging_notes), ''), packaging_notes),
+        packed_at = now(), packed_by = (select auth.uid())
+    where id = v_shipment_id;
+  end if;
+
+  update public.orders set status = 'packed' where id = p_order_id;
+  perform public.log_activity('order', p_order_id, p_order_id, 'order.packed', 'Order packed');
+  return v_shipment_id;
+end;
+$$;
+
+create or replace function public.mark_order_dispatched(
+  p_order_id uuid,
+  p_carrier text,
+  p_tracking_number text,
+  p_shipping_method text default null,
+  p_tracking_url text default null,
+  p_shipping_cost numeric default null,
+  p_dispatched_at timestamptz default null
+)
+returns uuid
+language plpgsql
+as $$
+declare
+  v_order record;
+  v_shipment_id uuid;
+  v_when timestamptz := coalesce(p_dispatched_at, now());
+begin
+  perform public.assert_can_write();
+  select * into v_order from public.orders where id = p_order_id for update;
+  if v_order.id is null then raise exception 'Order not found'; end if;
+  if v_order.status not in ('ready_to_pack', 'packed') then
+    raise exception 'Only packed or ready-to-pack orders can be dispatched';
+  end if;
+
+  select id into v_shipment_id from public.shipments
+  where order_id = p_order_id and status in ('pending', 'packed')
+  order by created_at desc limit 1;
+
+  if v_shipment_id is null then
+    insert into public.shipments (order_id, status) values (p_order_id, 'pending') returning id into v_shipment_id;
+  end if;
+
+  update public.shipments set
+    status = 'dispatched',
+    carrier = nullif(trim(p_carrier), ''),
+    tracking_number = nullif(trim(p_tracking_number), ''),
+    tracking_url = nullif(trim(p_tracking_url), ''),
+    shipping_method = coalesce(nullif(trim(p_shipping_method), ''), shipping_method, v_order.shipping_method),
+    shipping_cost = p_shipping_cost,
+    packed_at = coalesce(packed_at, v_when),
+    packed_by = coalesce(packed_by, (select auth.uid())),
+    dispatched_at = v_when,
+    dispatched_by = (select auth.uid()),
+    marketplace_push_status = case when v_order.source = 'manual' then 'not_required'::public.marketplace_push_status
+                                   else 'pending'::public.marketplace_push_status end
+  where id = v_shipment_id;
+
+  update public.orders set
+    status = 'dispatched',
+    dispatched_at = v_when,
+    carrier = nullif(trim(p_carrier), ''),
+    tracking_number = nullif(trim(p_tracking_number), '')
+  where id = p_order_id;
+
+  update public.production_jobs set stage = 'dispatched'
+  where order_id = p_order_id and stage not in ('dispatched', 'completed');
+
+  perform public.log_activity('order', p_order_id, p_order_id, 'order.dispatched',
+    'Order dispatched' || coalesce(' via ' || nullif(trim(p_carrier), ''), '') ||
+    coalesce(' — tracking ' || nullif(trim(p_tracking_number), ''), ''));
+  return v_shipment_id;
+end;
+$$;
+
+create or replace function public.mark_order_completed(p_order_id uuid)
+returns void
+language plpgsql
+as $$
+begin
+  perform public.assert_can_write();
+  update public.orders set status = 'completed', completed_at = now()
+  where id = p_order_id and status = 'dispatched';
+  if not found then raise exception 'Only dispatched orders can be completed'; end if;
+  update public.production_jobs set stage = 'completed' where order_id = p_order_id and stage = 'dispatched';
+  perform public.log_activity('order', p_order_id, p_order_id, 'order.completed', 'Order marked as completed');
+end;
+$$;
+
+-- -----------------------------------------------------------------------------
+-- Integration sync lock (prevents overlapping cron + manual syncs)
+-- -----------------------------------------------------------------------------
+create or replace function public.acquire_sync_lock(p_provider public.integration_provider, p_seconds integer default 600)
+returns boolean
+language plpgsql
+as $$
+begin
+  update public.integrations
+  set sync_locked_until = now() + make_interval(secs => p_seconds), last_sync_started_at = now()
+  where provider = p_provider
+    and (sync_locked_until is null or sync_locked_until < now());
+  return found;
+end;
+$$;
+
+-- -----------------------------------------------------------------------------
+-- Sample data purge (only rows flagged is_sample)
+-- -----------------------------------------------------------------------------
+create or replace function public.purge_sample_data()
+returns jsonb
+language plpgsql
+as $$
+declare
+  v_orders integer;
+  v_customers integer;
+  v_products integer;
+  v_filament integer;
+begin
+  if not public.is_admin() then
+    raise exception 'Only owners and admins can remove sample data';
+  end if;
+  -- Free any printer that is mid-way through a sample print.
+  update public.printers
+  set status = 'available', current_job_id = null, current_print_run_id = null, estimated_completion_at = null
+  where current_job_id in (select id from public.production_jobs where is_sample);
+  delete from public.orders where is_sample;
+  get diagnostics v_orders = row_count;
+  delete from public.customers c where c.is_sample
+    and not exists (select 1 from public.orders o where o.customer_id = c.id);
+  get diagnostics v_customers = row_count;
+  delete from public.products p where p.is_sample
+    and not exists (select 1 from public.order_items oi where oi.product_id = p.id);
+  get diagnostics v_products = row_count;
+  delete from public.filament_stock where is_sample;
+  get diagnostics v_filament = row_count;
+  return jsonb_build_object('orders', v_orders, 'customers', v_customers, 'products', v_products, 'filament', v_filament);
+end;
+$$;
+
+-- -----------------------------------------------------------------------------
+-- Baseline configuration rows (real configuration, not sample data)
+-- -----------------------------------------------------------------------------
+insert into public.business_settings (singleton) values (true);
+
+insert into public.integrations (provider, display_name)
+values ('etsy', 'Etsy'), ('shopify', 'Shopify');
+
+insert into public.printers (name, manufacturer, model, printer_type, build_volume_x_mm, build_volume_y_mm, build_volume_z_mm,
+                             nozzle_size_mm, supported_materials, has_multi_material, sort_order)
+values
+  ('Bambu Lab A1', 'Bambu Lab', 'A1', 'FDM (bed slinger)', 256, 256, 256, 0.4,
+   array['PLA', 'PLA+', 'PETG', 'TPU'], false, 1),
+  ('Flashforge AD5X', 'Flashforge', 'AD5X', 'FDM (CoreXY, multi-colour)', 220, 220, 220, 0.4,
+   array['PLA', 'PLA+', 'PETG', 'TPU'], true, 2),
+  ('Flashforge Adventurer 5M', 'Flashforge', 'Adventurer 5M', 'FDM (CoreXY)', 220, 220, 220, 0.4,
+   array['PLA', 'PLA+', 'PETG', 'TPU'], false, 3);
+
+
+-- ============================================================
+-- 20261118000003_row_level_security.sql
+-- ============================================================
+-- =============================================================================
+-- PrintFlow — Row Level Security
+-- -----------------------------------------------------------------------------
+-- Model (single business, multi-user ready):
+--   viewer  : read everything operational
+--   staff   : + create/update operational data
+--   admin   : + delete, settings, integrations, user management
+--   owner   : + grant owner role
+-- Inactive / unapproved accounts see nothing.
+-- integration_credentials has RLS enabled and NO policies: service role only.
+-- =============================================================================
+
+do $$
+declare
+  t text;
+begin
+  foreach t in array array[
+    'profiles', 'business_settings', 'customers', 'customer_identities', 'customer_addresses',
+    'printers', 'filament_stock', 'products', 'product_listings', 'orders', 'order_items',
+    'production_jobs', 'print_queue', 'print_runs', 'filament_usage', 'shipments',
+    'integrations', 'integration_credentials', 'sync_logs', 'internal_notes', 'activity_log'
+  ]
+  loop
+    execute format('alter table public.%I enable row level security', t);
+  end loop;
+end;
+$$;
+
+-- Standard operational tables: read = member, write = staff+, delete = admin+
+do $$
+declare
+  t text;
+begin
+  foreach t in array array[
+    'customers', 'customer_identities', 'customer_addresses', 'printers', 'filament_stock',
+    'products', 'product_listings', 'orders', 'order_items', 'production_jobs', 'print_queue',
+    'print_runs', 'shipments'
+  ]
+  loop
+    execute format('create policy %I on public.%I for select to authenticated using (public.is_team_member())', t || '_select', t);
+    execute format('create policy %I on public.%I for insert to authenticated with check (public.can_write())', t || '_insert', t);
+    execute format('create policy %I on public.%I for update to authenticated using (public.can_write()) with check (public.can_write())', t || '_update', t);
+    execute format('create policy %I on public.%I for delete to authenticated using (public.is_admin())', t || '_delete', t);
+  end loop;
+end;
+$$;
+
+-- Staff may remove queue entries and order lines while organising work.
+create policy print_queue_delete_staff on public.print_queue for delete to authenticated using (public.can_write());
+
+-- profiles
+create policy profiles_select on public.profiles for select to authenticated
+  using (id = (select auth.uid()) or public.is_team_member());
+create policy profiles_update_self on public.profiles for update to authenticated
+  using (id = (select auth.uid()) or public.is_admin())
+  with check (id = (select auth.uid()) or public.is_admin());
+
+-- business_settings
+create policy business_settings_select on public.business_settings for select to authenticated using (public.is_team_member());
+create policy business_settings_update on public.business_settings for update to authenticated
+  using (public.is_admin()) with check (public.is_admin());
+
+-- filament_usage: append-only ledger
+create policy filament_usage_select on public.filament_usage for select to authenticated using (public.is_team_member());
+create policy filament_usage_insert on public.filament_usage for insert to authenticated with check (public.can_write());
+
+-- integrations: readable by members (no secrets in this table), editable by admins
+create policy integrations_select on public.integrations for select to authenticated using (public.is_team_member());
+create policy integrations_update on public.integrations for update to authenticated
+  using (public.is_admin()) with check (public.is_admin());
+
+-- sync_logs: read-only for members; written by the server (service role)
+create policy sync_logs_select on public.sync_logs for select to authenticated using (public.is_team_member());
+
+-- internal notes: authors can edit/delete their own; admins any
+create policy internal_notes_select on public.internal_notes for select to authenticated using (public.is_team_member());
+create policy internal_notes_insert on public.internal_notes for insert to authenticated
+  with check (public.can_write() and author_id = (select auth.uid()));
+create policy internal_notes_update on public.internal_notes for update to authenticated
+  using (author_id = (select auth.uid()) or public.is_admin())
+  with check (author_id = (select auth.uid()) or public.is_admin());
+create policy internal_notes_delete on public.internal_notes for delete to authenticated
+  using (author_id = (select auth.uid()) or public.is_admin());
+
+-- activity_log: append-only audit trail
+create policy activity_log_select on public.activity_log for select to authenticated using (public.is_team_member());
+create policy activity_log_insert on public.activity_log for insert to authenticated
+  with check (public.can_write() and (actor_id is null or actor_id = (select auth.uid())));
+
+-- -----------------------------------------------------------------------------
+-- Function privileges
+-- -----------------------------------------------------------------------------
+revoke execute on function public.ingest_marketplace_order(public.order_source, jsonb, jsonb, text) from public, anon, authenticated;
+grant execute on function public.ingest_marketplace_order(public.order_source, jsonb, jsonb, text) to service_role;
+
+revoke execute on function public.acquire_sync_lock(public.integration_provider, integer) from public, anon, authenticated;
+grant execute on function public.acquire_sync_lock(public.integration_provider, integer) to service_role;
+
+revoke execute on function public.handle_new_user() from public, anon, authenticated;
+
+grant execute on function public.setup_required() to anon, authenticated;
+
+
+
+-- ============================================================
+-- 20261118000004_storage.sql
+-- ============================================================
+-- =============================================================================
+-- PrintFlow — Storage buckets (private; accessed via signed URLs)
+-- =============================================================================
+
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values
+  ('product-images', 'product-images', false, 5242880,
+   array['image/jpeg', 'image/png', 'image/webp', 'image/avif']),
+  ('model-files', 'model-files', false, 104857600, null)
+on conflict (id) do nothing;
+
+create policy "printflow_read_files" on storage.objects for select to authenticated
+  using (bucket_id in ('product-images', 'model-files') and public.is_team_member());
+
+create policy "printflow_insert_files" on storage.objects for insert to authenticated
+  with check (bucket_id in ('product-images', 'model-files') and public.can_write());
+
+create policy "printflow_update_files" on storage.objects for update to authenticated
+  using (bucket_id in ('product-images', 'model-files') and public.can_write());
+
+create policy "printflow_delete_files" on storage.objects for delete to authenticated
+  using (bucket_id in ('product-images', 'model-files') and public.can_write());
+
+
+-- ============================================================
+-- 20261118000005_analytics.sql
+-- ============================================================
+-- =============================================================================
+-- PrintFlow — dashboard & analytics functions (security invoker; RLS applies)
+-- -----------------------------------------------------------------------------
+-- Definitions used throughout:
+--   gross sales   = order total (items + shipping + tax − discounts)
+--   net revenue   = gross sales − tax collected
+--   estimated profit = net revenue − estimated costs (marketplace fees,
+--                      filament, packaging, labour/other, recorded shipping).
+-- Estimated profit is an operational indicator, NOT accounting profit.
+-- Cancelled orders are excluded from all revenue figures.
+-- =============================================================================
+
+create or replace function public.dashboard_metrics()
+returns jsonb
+language plpgsql
+stable
+as $$
+declare
+  v_tz text := coalesce((select timezone from public.business_settings limit 1), 'Europe/London');
+  v_today_start timestamptz := (date_trunc('day', now() at time zone v_tz)) at time zone v_tz;
+  v_result jsonb;
+begin
+  select jsonb_build_object(
+    'total_orders', count(*) filter (where status <> 'cancelled'),
+    'new_today', count(*) filter (where order_date >= v_today_start and status <> 'cancelled'),
+    'awaiting_production', count(*) filter (where status = 'new'),
+    'in_production', count(*) filter (where status = 'in_production'),
+    'ready_to_pack', count(*) filter (where status = 'ready_to_pack'),
+    'awaiting_dispatch', count(*) filter (where status = 'packed'),
+    'on_hold', count(*) filter (where status = 'on_hold'),
+    'overdue', count(*) filter (where dispatch_by < now() and status not in ('dispatched', 'completed', 'cancelled')),
+    'total_sales', coalesce(sum(total) filter (where status <> 'cancelled'), 0),
+    'etsy_sales', coalesce(sum(total) filter (where status <> 'cancelled' and source = 'etsy'), 0),
+    'shopify_sales', coalesce(sum(total) filter (where status <> 'cancelled' and source = 'shopify'), 0),
+    'manual_sales', coalesce(sum(total) filter (where status <> 'cancelled' and source = 'manual'), 0),
+    'etsy_orders', count(*) filter (where status <> 'cancelled' and source = 'etsy'),
+    'shopify_orders', count(*) filter (where status <> 'cancelled' and source = 'shopify'),
+    'manual_orders', count(*) filter (where status <> 'cancelled' and source = 'manual'),
+    'sample_orders', count(*) filter (where is_sample)
+  )
+  into v_result
+  from public.orders;
+
+  v_result := v_result || jsonb_build_object(
+    'currently_printing', (select count(*) from public.print_runs where status = 'printing'),
+    'jobs_by_stage', coalesce((
+      select jsonb_object_agg(stage, n) from (
+        select stage, count(*) n from public.production_jobs group by stage
+      ) s
+    ), '{}'::jsonb),
+    'sales_30d', coalesce((
+      select jsonb_agg(d order by d ->> 'date') from (
+        select jsonb_build_object(
+          'date', to_char(day, 'YYYY-MM-DD'),
+          'etsy', coalesce(sum(o.total) filter (where o.source = 'etsy'), 0),
+          'shopify', coalesce(sum(o.total) filter (where o.source = 'shopify'), 0),
+          'manual', coalesce(sum(o.total) filter (where o.source = 'manual'), 0),
+          'orders', count(o.id)
+        ) d
+        from generate_series(
+          date_trunc('day', now() at time zone v_tz) - interval '29 days',
+          date_trunc('day', now() at time zone v_tz),
+          interval '1 day'
+        ) day
+        left join public.orders o
+          on o.status <> 'cancelled'
+         and (o.order_date at time zone v_tz) >= day
+         and (o.order_date at time zone v_tz) < day + interval '1 day'
+        group by day
+      ) x
+    ), '[]'::jsonb)
+  );
+  return v_result;
+end;
+$$;
+
+-- Summary figures for one period. Internal helper for analytics_report.
+create or replace function public.analytics_period_summary(p_from timestamptz, p_to timestamptz)
+returns jsonb
+language plpgsql
+stable
+as $$
+declare
+  s record;
+  v_result jsonb;
+begin
+  select * into s from public.business_settings limit 1;
+
+  with o as (
+    select * from public.orders
+    where status <> 'cancelled' and order_date >= p_from and order_date < p_to
+  ),
+  items as (
+    select oi.*, p.estimated_filament_g, p.material_cost, p.packaging_cost, p.labour_cost, p.other_cost
+    from public.order_items oi
+    join o on o.id = oi.order_id
+    left join public.products p on p.id = oi.product_id
+  ),
+  recorded_filament as (
+    -- Actual recorded consumption for jobs belonging to these orders
+    select j.order_item_id, sum(fu.cost) as cost
+    from public.filament_usage fu
+    join public.production_jobs j on j.id = fu.production_job_id
+    join o on o.id = j.order_id
+    where fu.kind in ('print', 'failed_print')
+    group by j.order_item_id
+  ),
+  item_costs as (
+    select
+      i.order_id,
+      -- Filament: recorded cost if available, else product material cost override,
+      -- else estimated grams × default cost/kg.
+      coalesce(
+        rf.cost,
+        i.material_cost * i.quantity,
+        i.estimated_filament_g * i.quantity * s.default_filament_cost_per_kg / 1000.0,
+        0
+      ) as filament_cost,
+      (rf.cost is not null) as filament_recorded,
+      (i.product_id is null) as unmapped,
+      coalesce(i.packaging_cost, 0) * i.quantity as packaging_cost,
+      (coalesce(i.labour_cost, 0) + coalesce(i.other_cost, 0)) * i.quantity as other_cost
+    from items i
+    left join recorded_filament rf on rf.order_item_id = i.id
+  ),
+  order_costs as (
+    select
+      o.id, o.source, o.total, o.tax_total,
+      coalesce(sum(ic.filament_cost), 0) as filament_cost,
+      greatest(coalesce(sum(ic.packaging_cost), 0), s.default_packaging_cost) as packaging_cost,
+      coalesce(sum(ic.other_cost), 0) as other_cost,
+      case o.source
+        when 'etsy' then o.total * s.etsy_fee_percent / 100.0 + s.etsy_fixed_fee
+        when 'shopify' then o.total * s.shopify_fee_percent / 100.0 + s.shopify_fixed_fee
+        else 0
+      end as fees,
+      coalesce((select sum(sh.shipping_cost) from public.shipments sh where sh.order_id = o.id), 0) as shipping_cost,
+      bool_or(ic.unmapped) as has_unmapped
+    from o
+    left join item_costs ic on ic.order_id = o.id
+    group by o.id, o.source, o.total, o.tax_total
+  )
+  select jsonb_build_object(
+    'orders', count(*),
+    'gross_sales', coalesce(sum(total), 0),
+    'tax_collected', coalesce(sum(tax_total), 0),
+    'net_revenue', coalesce(sum(total - tax_total), 0),
+    'etsy_revenue', coalesce(sum(total - tax_total) filter (where source = 'etsy'), 0),
+    'shopify_revenue', coalesce(sum(total - tax_total) filter (where source = 'shopify'), 0),
+    'manual_revenue', coalesce(sum(total - tax_total) filter (where source = 'manual'), 0),
+    'average_order_value', coalesce(round(avg(total)::numeric, 2), 0),
+    'est_marketplace_fees', coalesce(round(sum(fees)::numeric, 2), 0),
+    'est_filament_cost', coalesce(round(sum(filament_cost)::numeric, 2), 0),
+    'est_packaging_cost', coalesce(round(sum(packaging_cost)::numeric, 2), 0),
+    'est_other_cost', coalesce(round(sum(other_cost)::numeric, 2), 0),
+    'recorded_shipping_cost', coalesce(round(sum(shipping_cost)::numeric, 2), 0),
+    'est_total_costs', coalesce(round(sum(fees + filament_cost + packaging_cost + other_cost + shipping_cost)::numeric, 2), 0),
+    'est_profit', coalesce(round(sum((total - tax_total) - (fees + filament_cost + packaging_cost + other_cost + shipping_cost))::numeric, 2), 0),
+    'orders_with_unmapped_items', count(*) filter (where has_unmapped)
+  )
+  into v_result
+  from order_costs;
+
+  return v_result;
+end;
+$$;
+
+create or replace function public.analytics_report(p_from date, p_to date)
+returns jsonb
+language plpgsql
+stable
+as $$
+declare
+  v_tz text := coalesce((select timezone from public.business_settings limit 1), 'Europe/London');
+  v_from timestamptz := (p_from::timestamp) at time zone v_tz;
+  v_to timestamptz := ((p_to + 1)::timestamp) at time zone v_tz;   -- inclusive end date
+  v_len interval := v_to - v_from;
+  v_result jsonb;
+begin
+  if p_to < p_from then
+    raise exception 'End date must be on or after start date';
+  end if;
+
+  v_result := jsonb_build_object(
+    'from', p_from,
+    'to', p_to,
+    'current', public.analytics_period_summary(v_from, v_to),
+    'previous', public.analytics_period_summary(v_from - v_len, v_from)
+  );
+
+  -- Monthly comparison (calendar months overlapping the range)
+  v_result := v_result || jsonb_build_object('monthly', coalesce((
+    select jsonb_agg(m order by m ->> 'month') from (
+      select jsonb_build_object(
+        'month', to_char(date_trunc('month', o.order_date at time zone v_tz), 'YYYY-MM'),
+        'orders', count(*),
+        'etsy', coalesce(sum(o.total - o.tax_total) filter (where o.source = 'etsy'), 0),
+        'shopify', coalesce(sum(o.total - o.tax_total) filter (where o.source = 'shopify'), 0),
+        'manual', coalesce(sum(o.total - o.tax_total) filter (where o.source = 'manual'), 0),
+        'net_revenue', coalesce(sum(o.total - o.tax_total), 0)
+      ) m
+      from public.orders o
+      where o.status <> 'cancelled'
+        and o.order_date >= date_trunc('month', v_from at time zone v_tz) at time zone v_tz
+        and o.order_date < v_to
+      group by date_trunc('month', o.order_date at time zone v_tz)
+    ) x
+  ), '[]'::jsonb));
+
+  -- Daily order volume
+  v_result := v_result || jsonb_build_object('daily', coalesce((
+    select jsonb_agg(d order by d ->> 'date') from (
+      select jsonb_build_object(
+        'date', to_char(day, 'YYYY-MM-DD'),
+        'orders', count(o.id),
+        'revenue', coalesce(sum(o.total - o.tax_total), 0)
+      ) d
+      from generate_series(p_from::timestamp, p_to::timestamp, interval '1 day') day
+      left join public.orders o
+        on o.status <> 'cancelled'
+       and (o.order_date at time zone v_tz) >= day
+       and (o.order_date at time zone v_tz) < day + interval '1 day'
+      group by day
+    ) x
+  ), '[]'::jsonb));
+
+  -- Best-selling products (falls back to line title for unmapped items)
+  v_result := v_result || jsonb_build_object('best_sellers', coalesce((
+    select jsonb_agg(b) from (
+      select jsonb_build_object(
+        'product_id', oi.product_id,
+        'name', coalesce(p.name, oi.title),
+        'sku', coalesce(p.sku, oi.sku),
+        'mapped', oi.product_id is not null,
+        'units', sum(oi.quantity),
+        'revenue', sum(oi.total_price),
+        'orders', count(distinct oi.order_id)
+      ) b
+      from public.order_items oi
+      join public.orders o on o.id = oi.order_id
+      left join public.products p on p.id = oi.product_id
+      where o.status <> 'cancelled' and o.order_date >= v_from and o.order_date < v_to
+      group by oi.product_id, coalesce(p.name, oi.title), coalesce(p.sku, oi.sku)
+      order by sum(oi.quantity) desc, sum(oi.total_price) desc
+      limit 10
+    ) x
+  ), '[]'::jsonb));
+
+  -- Production performance
+  v_result := v_result || jsonb_build_object('production', (
+    select jsonb_build_object(
+      'print_runs', count(*),
+      'succeeded', count(*) filter (where status = 'succeeded'),
+      'failed', count(*) filter (where status = 'failed'),
+      'failure_rate', case when count(*) filter (where status in ('succeeded', 'failed')) > 0
+        then round(100.0 * count(*) filter (where status = 'failed') / count(*) filter (where status in ('succeeded', 'failed')), 1)
+        else 0 end,
+      'avg_print_minutes', coalesce(round(avg(extract(epoch from (ended_at - started_at)) / 60.0) filter (where status = 'succeeded')::numeric, 0), 0),
+      'total_print_hours', coalesce(round(sum(extract(epoch from (ended_at - started_at)) / 3600.0) filter (where ended_at is not null)::numeric, 1), 0)
+    )
+    from public.print_runs
+    where started_at >= v_from and started_at < v_to
+  ));
+
+  v_result := v_result || jsonb_build_object('fulfilment', (
+    select jsonb_build_object(
+      'dispatched_orders', count(*),
+      'avg_turnaround_hours', coalesce(round(avg(extract(epoch from (dispatched_at - order_date)) / 3600.0)::numeric, 1), 0),
+      'on_time_rate', case when count(*) filter (where dispatch_by is not null) > 0
+        then round(100.0 * count(*) filter (where dispatch_by is not null and dispatched_at <= dispatch_by)
+                   / count(*) filter (where dispatch_by is not null), 1)
+        else null end
+    )
+    from public.orders
+    where dispatched_at >= v_from and dispatched_at < v_to
+  ));
+
+  -- Recorded filament consumption in the period (actual ledger entries)
+  v_result := v_result || jsonb_build_object('filament', (
+    select jsonb_build_object(
+      'recorded_grams', coalesce(sum(fu.grams) filter (where fu.kind in ('print', 'failed_print', 'waste')), 0),
+      'recorded_cost', coalesce(sum(fu.cost) filter (where fu.kind in ('print', 'failed_print', 'waste')), 0),
+      'failed_print_grams', coalesce(sum(fu.grams) filter (where fu.kind = 'failed_print'), 0),
+      'by_material', coalesce((
+        select jsonb_agg(jsonb_build_object('material', material, 'grams', grams, 'cost', cost) order by grams desc)
+        from (
+          select fs.material, sum(fu2.grams) grams, coalesce(sum(fu2.cost), 0) cost
+          from public.filament_usage fu2
+          join public.filament_stock fs on fs.id = fu2.filament_stock_id
+          where fu2.created_at >= v_from and fu2.created_at < v_to
+            and fu2.kind in ('print', 'failed_print', 'waste')
+          group by fs.material
+        ) m
+      ), '[]'::jsonb)
+    )
+    from public.filament_usage fu
+    where fu.created_at >= v_from and fu.created_at < v_to
+  ));
+
+  v_result := v_result || jsonb_build_object(
+    'includes_sample_data', exists (select 1 from public.orders where is_sample and order_date >= v_from and order_date < v_to)
+  );
+
+  return v_result;
+end;
+$$;
+
+-- Customer aggregates for the customer list.
+create or replace view public.customer_summaries
+with (security_invoker = true)
+as
+select
+  c.id,
+  c.display_name,
+  c.email,
+  c.phone,
+  c.first_source,
+  c.is_sample,
+  c.created_at,
+  count(o.id) filter (where o.status <> 'cancelled') as order_count,
+  coalesce(sum(o.total) filter (where o.status <> 'cancelled'), 0) as total_spend,
+  max(o.order_date) as last_order_at,
+  array_remove(array_agg(distinct o.source), null) as sources,
+  min(o.currency) as currency
+from public.customers c
+left join public.orders o on o.customer_id = c.id
+group by c.id;
+
+-- Filament stock with derived figures
+create or replace view public.filament_stock_overview
+with (security_invoker = true)
+as
+select
+  fs.*,
+  round((fs.remaining_g / nullif(fs.spool_weight_g, 0) * 100)::numeric, 0) as remaining_percent,
+  case when fs.purchase_price is not null and fs.spool_weight_g > 0
+       then round((fs.purchase_price / fs.spool_weight_g * 1000)::numeric, 2) end as cost_per_kg,
+  (fs.remaining_g <= fs.low_stock_threshold_g) as is_low_stock
+from public.filament_stock fs;
+
+
+-- ============================================================
+-- 20261118000006_customer_merge.sql
+-- ============================================================
+-- =============================================================================
+-- PrintFlow — explicit customer merge
+-- Customers are never merged automatically (same name ≠ same person). Staff
+-- can merge two records deliberately after checking them; this is atomic.
+-- =============================================================================
+create or replace function public.merge_customers(p_target uuid, p_source uuid)
+returns void
+language plpgsql
+as $$
+declare
+  v_target_name text;
+  v_source_name text;
+begin
+  perform public.assert_can_write();
+  if p_target = p_source then raise exception 'Choose two different customers'; end if;
+  select display_name into v_target_name from public.customers where id = p_target for update;
+  select display_name into v_source_name from public.customers where id = p_source for update;
+  if v_target_name is null or v_source_name is null then raise exception 'Customer not found'; end if;
+
+  update public.orders set customer_id = p_target where customer_id = p_source;
+  update public.customer_identities set customer_id = p_target where customer_id = p_source;
+  -- Move addresses that the target doesn't already have.
+  update public.customer_addresses a set customer_id = p_target
+  where a.customer_id = p_source
+    and not exists (select 1 from public.customer_addresses b where b.customer_id = p_target and b.fingerprint = a.fingerprint);
+  update public.internal_notes set entity_id = p_target where entity_type = 'customer' and entity_id = p_source;
+  update public.customers t set
+    email = coalesce(t.email, s.email),
+    phone = coalesce(t.phone, s.phone),
+    notes = nullif(concat_ws(E'\n', t.notes, s.notes), '')
+  from public.customers s
+  where t.id = p_target and s.id = p_source;
+  delete from public.customers where id = p_source;
+
+  perform public.log_activity('customer', p_target, null, 'customer.merged',
+    'Merged customer record “' || v_source_name || '” into “' || v_target_name || '”');
+end;
+$$;
+
+
+-- ============================================================
+-- 20261119000001_sync_reliability.sql
+-- ============================================================
+-- =============================================================================
+-- PrintFlow — Phase 1: marketplace sync reliability
+-- -----------------------------------------------------------------------------
+-- Additive only: new table, new nullable/defaulted columns, one enum value and
+-- a replacement ingest function. No existing rows are modified or removed.
+--
+--  1. sync_failures        — durable record of orders that failed to ingest,
+--                            retried on later runs and cleared on success.
+--  2. sync_logs            — retry/recovery counters and structured warnings.
+--  3. orders               — customer_data_status distinguishes "withheld by the
+--                            marketplace" from "genuinely empty".
+--  4. order_items          — marketplace_options keeps the untouched original
+--                            variation / custom-attribute data.
+--  5. integrations         — customer data access state.
+--  6. sync_trigger         — 'resync' for administrative full resynchronisation.
+--  7. ingest_marketplace_order — force mode for resync, restricted-customer
+--                            handling, change detection, original options.
+-- =============================================================================
+
+-- 6. Enum value (must be committed before use; it is only used at runtime).
+alter type public.sync_trigger add value if not exists 'resync';
+
+-- -----------------------------------------------------------------------------
+-- 1. Failed order recovery
+-- -----------------------------------------------------------------------------
+create table public.sync_failures (
+  id uuid primary key default gen_random_uuid(),
+  integration_id uuid references public.integrations (id) on delete cascade,
+  provider public.integration_provider not null,
+  external_order_id text not null,
+  marketplace_updated_at timestamptz,
+  -- Normalised {order, items} payload so the order can be retried even if the
+  -- marketplace never returns it again.
+  payload jsonb not null,
+  last_error text not null,
+  attempts integer not null default 1 check (attempts >= 1),
+  first_failed_at timestamptz not null default now(),
+  last_failed_at timestamptz not null default now(),
+  last_sync_log_id uuid references public.sync_logs (id) on delete set null,
+  resolved_at timestamptz,
+  resolved_sync_log_id uuid references public.sync_logs (id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (provider, external_order_id)
+);
+create index sync_failures_open_idx on public.sync_failures (provider, last_failed_at desc) where resolved_at is null;
+
+create trigger sync_failures_set_updated_at
+  before update on public.sync_failures
+  for each row execute function public.set_updated_at();
+
+alter table public.sync_failures enable row level security;
+-- Readable by the team (shown on the integrations page); written by the server only.
+create policy sync_failures_select on public.sync_failures for select to authenticated using (public.is_team_member());
+
+-- Record (or re-open) a failure and return the cumulative attempt count.
+create or replace function public.record_sync_failure(
+  p_provider public.integration_provider,
+  p_external_order_id text,
+  p_marketplace_updated_at timestamptz,
+  p_payload jsonb,
+  p_error text,
+  p_sync_log_id uuid
+)
+returns integer
+language plpgsql
+as $$
+declare
+  v_attempts integer;
+begin
+  insert into public.sync_failures (
+    integration_id, provider, external_order_id, marketplace_updated_at, payload, last_error, last_sync_log_id
+  ) values (
+    (select id from public.integrations where provider = p_provider),
+    p_provider, p_external_order_id, p_marketplace_updated_at, p_payload, left(p_error, 2000), p_sync_log_id
+  )
+  on conflict (provider, external_order_id) do update set
+    -- A previously resolved failure that fails again starts a new count.
+    attempts = case when public.sync_failures.resolved_at is null then public.sync_failures.attempts + 1 else 1 end,
+    first_failed_at = case when public.sync_failures.resolved_at is null then public.sync_failures.first_failed_at else now() end,
+    marketplace_updated_at = greatest(public.sync_failures.marketplace_updated_at, excluded.marketplace_updated_at),
+    -- Keep the newest payload we have seen.
+    payload = case
+      when public.sync_failures.marketplace_updated_at is null
+        or excluded.marketplace_updated_at >= public.sync_failures.marketplace_updated_at then excluded.payload
+      else public.sync_failures.payload end,
+    last_error = excluded.last_error,
+    last_failed_at = now(),
+    last_sync_log_id = excluded.last_sync_log_id,
+    resolved_at = null,
+    resolved_sync_log_id = null
+  returning attempts into v_attempts;
+  return v_attempts;
+end;
+$$;
+
+create or replace function public.resolve_sync_failure(
+  p_provider public.integration_provider,
+  p_external_order_id text,
+  p_sync_log_id uuid
+)
+returns boolean
+language plpgsql
+as $$
+begin
+  update public.sync_failures
+  set resolved_at = now(), resolved_sync_log_id = p_sync_log_id
+  where provider = p_provider and external_order_id = p_external_order_id and resolved_at is null;
+  return found;
+end;
+$$;
+
+revoke execute on function public.record_sync_failure(public.integration_provider, text, timestamptz, jsonb, text, uuid) from public, anon, authenticated;
+revoke execute on function public.resolve_sync_failure(public.integration_provider, text, uuid) from public, anon, authenticated;
+grant execute on function public.record_sync_failure(public.integration_provider, text, timestamptz, jsonb, text, uuid) to service_role;
+grant execute on function public.resolve_sync_failure(public.integration_provider, text, uuid) to service_role;
+
+-- -----------------------------------------------------------------------------
+-- 2. Sync log counters & warnings
+-- -----------------------------------------------------------------------------
+alter table public.sync_logs
+  add column orders_retried integer not null default 0,
+  add column orders_recovered integer not null default 0,
+  add column failures_outstanding integer not null default 0,
+  add column warnings jsonb not null default '[]'::jsonb;
+
+-- -----------------------------------------------------------------------------
+-- 3/4/5. Customer data status, original marketplace options, access state
+-- -----------------------------------------------------------------------------
+alter table public.orders
+  add column customer_data_status text not null default 'available'
+    check (customer_data_status in ('available', 'restricted')),
+  add column customer_data_restricted_fields text[] not null default '{}';
+
+comment on column public.orders.customer_data_status is
+  'available = the marketplace supplied customer fields (they may genuinely be empty); restricted = the marketplace withheld them (e.g. Shopify protected customer data).';
+
+alter table public.order_items
+  add column marketplace_options jsonb;
+
+comment on column public.order_items.marketplace_options is
+  'Untouched original variation / custom attribute data from the marketplace. personalisation and variant_details are derived from it.';
+
+alter table public.integrations
+  add column customer_data_access text not null default 'unknown'
+    check (customer_data_access in ('unknown', 'available', 'restricted')),
+  add column customer_data_checked_at timestamptz;
+
+-- -----------------------------------------------------------------------------
+-- 7. Ingest function (replaces the 4-argument version)
+-- -----------------------------------------------------------------------------
+
+-- Fingerprint of marketplace-owned data for one order, used to detect whether
+-- a forced resync actually changed anything.
+create or replace function public.marketplace_order_fingerprint(p_order_id uuid)
+returns text
+language sql
+stable
+as $$
+  select md5(
+    coalesce((
+      select jsonb_build_array(
+        o.external_order_number, o.customer_name, o.customer_email, o.shipping_address, o.order_date,
+        o.payment_status, o.marketplace_status, o.marketplace_fulfilment_status, o.currency, o.subtotal,
+        o.shipping_total, o.tax_total, o.discount_total, o.total, o.customer_note, o.shipping_method,
+        o.marketplace_dispatch_by, o.marketplace_cancelled_at, o.customer_data_status, o.status
+      )::text
+      from public.orders o where o.id = p_order_id
+    ), '') ||
+    coalesce((
+      select string_agg(
+        jsonb_build_array(
+          i.external_line_item_id, i.sku, i.title, i.variant_title, i.variant_details, i.quantity,
+          i.unit_price, i.total_price, i.personalisation, i.marketplace_options
+        )::text, '|' order by i.external_line_item_id
+      )
+      from public.order_items i where i.order_id = p_order_id
+    ), '')
+  );
+$$;
+
+drop function if exists public.ingest_marketplace_order(public.order_source, jsonb, jsonb, text);
+
+-- Idempotent upsert keyed on (source, external_order_id).
+--   * Only marketplace-owned columns are overwritten on update.
+--   * Internal production data (status, priority, notes, deadlines, printer
+--     assignments, stages, print history) is preserved.
+--   * Customers are matched by marketplace customer id, then exact email.
+--   * p_force (full resync) re-applies marketplace data even when the
+--     marketplace timestamp is unchanged; activity is only logged when the
+--     marketplace data actually changed.
+--   * When customer data is restricted by the marketplace, existing customer
+--     details are never overwritten with blanks and no customer is created.
+-- Returns {order_id, result: created|updated|unchanged}.
+create or replace function public.ingest_marketplace_order(
+  p_source public.order_source,
+  p_order jsonb,
+  p_items jsonb,
+  p_actor_label text default null,
+  p_force boolean default false
+)
+returns jsonb
+language plpgsql
+as $$
+declare
+  v_ext_id text := p_order ->> 'external_order_id';
+  v_existing record;
+  v_customer_id uuid;
+  v_ext_customer text := nullif(p_order #>> '{customer,external_id}', '');
+  v_email text := nullif(lower(trim(coalesce(p_order ->> 'customer_email', ''))), '');
+  v_name text := coalesce(nullif(trim(p_order ->> 'customer_name'), ''), 'Unknown customer');
+  v_addr jsonb := coalesce(p_order -> 'shipping_address', '{}'::jsonb);
+  v_mp_updated timestamptz := nullif(p_order ->> 'marketplace_updated_at', '')::timestamptz;
+  v_cancelled timestamptz := nullif(p_order ->> 'marketplace_cancelled_at', '')::timestamptz;
+  v_fulfilled boolean := coalesce((p_order ->> 'is_fulfilled')::boolean, false);
+  v_restricted boolean := coalesce(p_order ->> 'customer_data_status', 'available') = 'restricted';
+  v_restricted_fields text[] := coalesce(
+    (select array_agg(value) from jsonb_array_elements_text(coalesce(p_order -> 'customer_data_restricted_fields', '[]'::jsonb))),
+    '{}'
+  );
+  v_keep_customer boolean;
+  v_before text;
+  v_after text;
+  v_order_id uuid;
+  v_inserted boolean;
+  v_item jsonb;
+  v_product_id uuid;
+  v_status public.order_status;
+  v_listing_source public.integration_provider;
+begin
+  if p_source = 'manual' then
+    raise exception 'ingest_marketplace_order is for marketplace orders only';
+  end if;
+  if v_ext_id is null or v_ext_id = '' then
+    raise exception 'external_order_id is required';
+  end if;
+  v_listing_source := p_source::text::public.integration_provider;
+
+  select id, marketplace_updated_at, status, customer_id, customer_data_status
+  into v_existing
+  from public.orders
+  where source = p_source and external_order_id = v_ext_id;
+
+  -- Skip untouched orders cheaply — unless forced (resync), or the stored
+  -- customer data was restricted and the marketplace now supplies it.
+  if not p_force
+     and v_existing.id is not null and v_mp_updated is not null
+     and v_existing.marketplace_updated_at is not null
+     and v_mp_updated <= v_existing.marketplace_updated_at
+     and not (v_existing.customer_data_status = 'restricted' and not v_restricted) then
+    update public.orders set last_synced_at = now() where id = v_existing.id;
+    return jsonb_build_object('order_id', v_existing.id, 'result', 'unchanged');
+  end if;
+
+  -- Restricted data must never overwrite customer details we already hold.
+  v_keep_customer := v_restricted and v_existing.id is not null and v_existing.customer_data_status = 'available';
+
+  if v_existing.id is not null and p_force then
+    v_before := public.marketplace_order_fingerprint(v_existing.id);
+  end if;
+
+  -- ---- Customer resolution (skipped when the marketplace withheld it) -------
+  v_customer_id := v_existing.customer_id;
+  if not v_restricted then
+    if v_customer_id is null and v_ext_customer is not null then
+      select customer_id into v_customer_id
+      from public.customer_identities
+      where source = p_source and external_customer_id = v_ext_customer;
+    end if;
+    if v_customer_id is null and v_email is not null then
+      select id into v_customer_id
+      from public.customers
+      where lower(email) = v_email
+      order by created_at
+      limit 1;
+    end if;
+    if v_customer_id is null then
+      insert into public.customers (display_name, email, first_source)
+      values (v_name, v_email, p_source)
+      returning id into v_customer_id;
+    elsif v_email is not null then
+      update public.customers set email = coalesce(email, v_email) where id = v_customer_id;
+    end if;
+    if v_ext_customer is not null then
+      insert into public.customer_identities (customer_id, source, external_customer_id)
+      values (v_customer_id, p_source, v_ext_customer)
+      on conflict (source, external_customer_id) do nothing;
+    end if;
+    if coalesce(v_addr ->> 'line1', '') <> '' then
+      insert into public.customer_addresses (customer_id, name, line1, line2, city, region, postal_code, country_code, phone)
+      values (v_customer_id, v_addr ->> 'name', v_addr ->> 'line1', v_addr ->> 'line2', v_addr ->> 'city',
+              v_addr ->> 'region', v_addr ->> 'postal_code', v_addr ->> 'country_code', v_addr ->> 'phone')
+      on conflict (customer_id, fingerprint) do update set last_used_at = now();
+    end if;
+  end if;
+
+  -- ---- Order upsert ---------------------------------------------------------
+  v_status := case
+    when v_cancelled is not null then 'cancelled'::public.order_status
+    when v_fulfilled then 'completed'::public.order_status
+    else 'new'::public.order_status
+  end;
+
+  insert into public.orders (
+    source, external_order_id, external_order_number, customer_id, customer_name, customer_email,
+    shipping_address, order_date, payment_status, marketplace_status, marketplace_fulfilment_status,
+    currency, subtotal, shipping_total, tax_total, discount_total, total, customer_note,
+    shipping_method, marketplace_dispatch_by, marketplace_updated_at, marketplace_cancelled_at,
+    last_synced_at, status, dispatch_by, completed_at, customer_data_status, customer_data_restricted_fields
+  ) values (
+    p_source, v_ext_id, p_order ->> 'external_order_number', v_customer_id, v_name, v_email,
+    v_addr, coalesce(nullif(p_order ->> 'order_date', '')::timestamptz, now()),
+    coalesce(nullif(p_order ->> 'payment_status', ''), 'unknown')::public.payment_status,
+    p_order ->> 'marketplace_status', p_order ->> 'marketplace_fulfilment_status',
+    coalesce(nullif(p_order ->> 'currency', ''), 'GBP'),
+    coalesce((p_order ->> 'subtotal')::numeric, 0), coalesce((p_order ->> 'shipping_total')::numeric, 0),
+    coalesce((p_order ->> 'tax_total')::numeric, 0), coalesce((p_order ->> 'discount_total')::numeric, 0),
+    coalesce((p_order ->> 'total')::numeric, 0), nullif(p_order ->> 'customer_note', ''),
+    nullif(p_order ->> 'shipping_method', ''), nullif(p_order ->> 'marketplace_dispatch_by', '')::timestamptz,
+    v_mp_updated, v_cancelled, now(), v_status,
+    coalesce(nullif(p_order ->> 'marketplace_dispatch_by', '')::timestamptz, nullif(p_order ->> 'default_dispatch_by', '')::timestamptz),
+    case when v_status = 'completed' then now() end,
+    case when v_restricted then 'restricted' else 'available' end,
+    v_restricted_fields
+  )
+  on conflict (source, external_order_id) do update set
+    external_order_number = excluded.external_order_number,
+    customer_id = coalesce(public.orders.customer_id, excluded.customer_id),
+    customer_name = case when v_keep_customer then public.orders.customer_name else excluded.customer_name end,
+    customer_email = case when v_keep_customer then public.orders.customer_email
+                          else coalesce(excluded.customer_email, public.orders.customer_email) end,
+    shipping_address = case when v_keep_customer then public.orders.shipping_address else excluded.shipping_address end,
+    customer_data_status = case when v_keep_customer then public.orders.customer_data_status else excluded.customer_data_status end,
+    customer_data_restricted_fields = case when v_keep_customer then public.orders.customer_data_restricted_fields
+                                           else excluded.customer_data_restricted_fields end,
+    order_date = excluded.order_date,
+    payment_status = excluded.payment_status,
+    marketplace_status = excluded.marketplace_status,
+    marketplace_fulfilment_status = excluded.marketplace_fulfilment_status,
+    currency = excluded.currency,
+    subtotal = excluded.subtotal,
+    shipping_total = excluded.shipping_total,
+    tax_total = excluded.tax_total,
+    discount_total = excluded.discount_total,
+    total = excluded.total,
+    customer_note = excluded.customer_note,
+    shipping_method = excluded.shipping_method,
+    marketplace_dispatch_by = excluded.marketplace_dispatch_by,
+    -- Never move the marketplace timestamp backwards (e.g. a stale retry payload).
+    marketplace_updated_at = greatest(public.orders.marketplace_updated_at, excluded.marketplace_updated_at),
+    marketplace_cancelled_at = excluded.marketplace_cancelled_at,
+    last_synced_at = now(),
+    -- Internal working deadline is only filled if it was never set.
+    dispatch_by = coalesce(public.orders.dispatch_by, excluded.dispatch_by)
+  returning id, (xmax = 0) into v_order_id, v_inserted;
+
+  -- ---- Line items -----------------------------------------------------------
+  for v_item in select * from jsonb_array_elements(coalesce(p_items, '[]'::jsonb))
+  loop
+    v_product_id := null;
+    if nullif(v_item ->> 'external_listing_id', '') is not null then
+      select pl.product_id into v_product_id
+      from public.product_listings pl
+      where pl.source = v_listing_source
+        and pl.external_listing_id = v_item ->> 'external_listing_id'
+        and (pl.external_variant_id is null or pl.external_variant_id = v_item ->> 'external_variant_id')
+      order by (pl.external_variant_id is not null) desc
+      limit 1;
+    end if;
+    if v_product_id is null and nullif(v_item ->> 'sku', '') is not null then
+      select id into v_product_id from public.products where lower(sku) = lower(v_item ->> 'sku') limit 1;
+    end if;
+
+    insert into public.order_items (
+      order_id, product_id, external_line_item_id, external_listing_id, external_variant_id, sku,
+      title, variant_title, variant_details, quantity, unit_price, total_price, personalisation, marketplace_options
+    ) values (
+      v_order_id, v_product_id, v_item ->> 'external_line_item_id', v_item ->> 'external_listing_id',
+      v_item ->> 'external_variant_id', nullif(v_item ->> 'sku', ''),
+      coalesce(nullif(v_item ->> 'title', ''), 'Untitled item'), nullif(v_item ->> 'variant_title', ''),
+      coalesce(v_item -> 'variant_details', '[]'::jsonb),
+      greatest(1, coalesce((v_item ->> 'quantity')::integer, 1)),
+      coalesce((v_item ->> 'unit_price')::numeric, 0), coalesce((v_item ->> 'total_price')::numeric, 0),
+      nullif(v_item ->> 'personalisation', ''),
+      v_item -> 'marketplace_options'
+    )
+    on conflict (order_id, external_line_item_id) do update set
+      external_listing_id = excluded.external_listing_id,
+      external_variant_id = excluded.external_variant_id,
+      sku = excluded.sku,
+      title = excluded.title,
+      variant_title = excluded.variant_title,
+      variant_details = excluded.variant_details,
+      quantity = excluded.quantity,
+      unit_price = excluded.unit_price,
+      total_price = excluded.total_price,
+      personalisation = excluded.personalisation,
+      marketplace_options = coalesce(excluded.marketplace_options, public.order_items.marketplace_options),
+      -- Keep a manual product mapping if staff already set one.
+      product_id = coalesce(public.order_items.product_id, excluded.product_id);
+  end loop;
+
+  -- Keep quantities of not-yet-started jobs aligned with marketplace edits.
+  update public.production_jobs j
+  set quantity = oi.quantity
+  from public.order_items oi
+  where j.order_item_id = oi.id and oi.order_id = v_order_id
+    and j.quantity <> oi.quantity
+    and j.stage in ('new_order', 'awaiting_preparation', 'ready_to_print');
+
+  -- ---- Production jobs for new lines (never duplicated: unique order_item_id)
+  if v_cancelled is null then
+    insert into public.production_jobs (
+      order_id, order_item_id, product_id, stage, priority, quantity, printer_id,
+      estimated_print_minutes, material, colour, estimated_filament_g, print_requirements, due_date
+    )
+    select
+      v_order_id, oi.id, oi.product_id,
+      case when v_inserted and v_fulfilled then 'completed'::public.production_stage else 'new_order'::public.production_stage end,
+      o.priority, oi.quantity, p.default_printer_id,
+      p.estimated_print_minutes * oi.quantity, p.material, p.default_colour,
+      p.estimated_filament_g * oi.quantity, p.production_instructions, o.dispatch_by
+    from public.order_items oi
+    join public.orders o on o.id = oi.order_id
+    left join public.products p on p.id = oi.product_id
+    left join public.production_jobs j on j.order_item_id = oi.id
+    where oi.order_id = v_order_id and j.id is null
+    on conflict (order_item_id) do nothing;
+  end if;
+
+  -- ---- Marketplace-driven status transitions (existing orders) --------------
+  if not v_inserted then
+    if v_cancelled is not null and v_existing.status not in ('cancelled', 'dispatched', 'completed') then
+      update public.orders set status = 'cancelled' where id = v_order_id;
+      perform public.log_activity('order', v_order_id, v_order_id, 'order.cancelled_on_marketplace',
+        'Order was cancelled on ' || initcap(p_source::text), '{}'::jsonb, p_actor_label);
+    elsif v_fulfilled and v_existing.status not in ('cancelled', 'dispatched', 'completed') then
+      update public.orders set status = 'dispatched', dispatched_at = coalesce(dispatched_at, now())
+      where id = v_order_id;
+      update public.production_jobs set stage = 'dispatched'
+      where order_id = v_order_id and stage not in ('dispatched', 'completed');
+      perform public.log_activity('order', v_order_id, v_order_id, 'order.fulfilled_on_marketplace',
+        'Order was marked as shipped on ' || initcap(p_source::text) || ' outside PrintFlow', '{}'::jsonb, p_actor_label);
+    end if;
+
+    if p_force then
+      v_after := public.marketplace_order_fingerprint(v_order_id);
+      if v_after is not distinct from v_before then
+        return jsonb_build_object('order_id', v_order_id, 'result', 'unchanged');
+      end if;
+      perform public.log_activity('order', v_order_id, v_order_id, 'order.resynced',
+        'Marketplace data refreshed by a full resync from ' || initcap(p_source::text), '{}'::jsonb, p_actor_label);
+    else
+      perform public.log_activity('order', v_order_id, v_order_id, 'order.synced',
+        'Marketplace data updated from ' || initcap(p_source::text), '{}'::jsonb, p_actor_label);
+    end if;
+  else
+    perform public.log_activity('order', v_order_id, v_order_id, 'order.imported',
+      'Order imported from ' || initcap(p_source::text), jsonb_build_object('external_order_id', v_ext_id), p_actor_label);
+  end if;
+
+  return jsonb_build_object('order_id', v_order_id, 'result', case when v_inserted then 'created' else 'updated' end);
+end;
+$$;
+
+revoke execute on function public.ingest_marketplace_order(public.order_source, jsonb, jsonb, text, boolean) from public, anon, authenticated;
+grant execute on function public.ingest_marketplace_order(public.order_source, jsonb, jsonb, text, boolean) to service_role;
+revoke execute on function public.marketplace_order_fingerprint(uuid) from public, anon;
+
+
+-- ============================================================
+-- 20261119000002_production_units.sql
+-- ============================================================
+-- =============================================================================
+-- PrintFlow — Phase 2: production quantities & physical unit tracking
+-- -----------------------------------------------------------------------------
+-- Distinguishes three things that were previously one:
+--   production_jobs  = the production REQUIREMENT for one order line
+--                      (quantity = how many physical items are needed)
+--   print_runs       = one go on a printer; may contain several units
+--   production_units = the PHYSICAL items (one row per unit), each with its own
+--                      status, failure count and the personalisation it was
+--                      printed with
+--   print_run_units  = which units were on which run, and the outcome
+--
+-- Additive only. Existing jobs/runs are backfilled from their current state;
+-- no existing row is deleted. Numbered after 20261119000001 so it sorts after
+-- the Phase 1 migration.
+-- =============================================================================
+
+create type public.unit_status as enum ('pending', 'printing', 'printed', 'passed', 'cancelled', 'surplus');
+
+-- ---- Job columns -------------------------------------------------------------
+alter table public.production_jobs
+  -- Denormalised unit counts (maintained by trigger) for fast boards/lists.
+  add column quantity_printed integer not null default 0,   -- printed + passed QC
+  add column quantity_passed integer not null default 0,
+  add column quantity_pending integer not null default 0,   -- still to print
+  add column quantity_printing integer not null default 0,
+  add column quantity_surplus integer not null default 0,   -- printed but no longer needed
+  add column units_failed integer not null default 0,       -- cumulative failed unit attempts
+  -- A job closed because its order/line was cancelled. Kept for history.
+  add column cancelled_at timestamptz,
+  add column cancellation_reason text;
+
+-- ---- Units ------------------------------------------------------------------
+create table public.production_units (
+  id uuid primary key default gen_random_uuid(),
+  production_job_id uuid not null references public.production_jobs (id) on delete cascade,
+  unit_number integer not null check (unit_number > 0),
+  status public.unit_status not null default 'pending',
+  failed_attempts integer not null default 0,
+  last_print_run_id uuid references public.print_runs (id) on delete set null,
+  -- What was physically printed (snapshot at print start) so later marketplace
+  -- changes to personalisation/variants can be detected against real items.
+  printed_personalisation text,
+  printed_variant text,
+  printed_at timestamptz,
+  passed_at timestamptz,
+  completed_without_print boolean not null default false,
+  status_reason text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (production_job_id, unit_number)
+);
+create index production_units_job_idx on public.production_units (production_job_id, status);
+
+create trigger production_units_set_updated_at
+  before update on public.production_units
+  for each row execute function public.set_updated_at();
+
+create table public.print_run_units (
+  print_run_id uuid not null references public.print_runs (id) on delete cascade,
+  unit_id uuid not null references public.production_units (id) on delete cascade,
+  outcome text not null default 'printing' check (outcome in ('printing', 'succeeded', 'failed')),
+  created_at timestamptz not null default now(),
+  primary key (print_run_id, unit_id)
+);
+create index print_run_units_unit_idx on public.print_run_units (unit_id);
+
+alter table public.print_runs
+  add column quantity_succeeded integer check (quantity_succeeded >= 0),
+  add column quantity_failed integer check (quantity_failed >= 0);
+
+alter table public.production_units enable row level security;
+alter table public.print_run_units enable row level security;
+create policy production_units_select on public.production_units for select to authenticated using (public.is_team_member());
+create policy production_units_write on public.production_units for all to authenticated using (public.can_write()) with check (public.can_write());
+create policy print_run_units_select on public.print_run_units for select to authenticated using (public.is_team_member());
+create policy print_run_units_write on public.print_run_units for all to authenticated using (public.can_write()) with check (public.can_write());
+
+-- ---- Counter maintenance -------------------------------------------------------
+create or replace function public.refresh_job_unit_counts(p_job_id uuid)
+returns void
+language sql
+as $$
+  update public.production_jobs j set
+    quantity_printed = c.printed,
+    quantity_passed = c.passed,
+    quantity_pending = c.pending,
+    quantity_printing = c.printing,
+    quantity_surplus = c.surplus,
+    units_failed = c.failed
+  from (
+    select
+      count(*) filter (where status in ('printed', 'passed')) as printed,
+      count(*) filter (where status = 'passed') as passed,
+      count(*) filter (where status = 'pending') as pending,
+      count(*) filter (where status = 'printing') as printing,
+      count(*) filter (where status = 'surplus') as surplus,
+      coalesce(sum(failed_attempts), 0) as failed
+    from public.production_units where production_job_id = p_job_id
+  ) c
+  where j.id = p_job_id
+    and (j.quantity_printed, j.quantity_passed, j.quantity_pending, j.quantity_printing, j.quantity_surplus, j.units_failed)
+        is distinct from (c.printed::int, c.passed::int, c.pending::int, c.printing::int, c.surplus::int, c.failed::int);
+$$;
+
+create or replace function public.production_units_after_write()
+returns trigger
+language plpgsql
+as $$
+begin
+  perform public.refresh_job_unit_counts(coalesce(new.production_job_id, old.production_job_id));
+  return null;
+end;
+$$;
+
+create trigger production_units_after_write
+  after insert or update or delete on public.production_units
+  for each row execute function public.production_units_after_write();
+
+-- Make the active units (pending/printing/printed/passed) match job.quantity.
+-- Never touches units that are printing. Excess is removed from pending units
+-- first (→ cancelled), then printed units become surplus (they physically exist).
+create or replace function public.sync_job_units(p_job_id uuid, p_reason text default null)
+returns jsonb
+language plpgsql
+as $$
+declare
+  v_qty integer;
+  v_active integer;
+  v_next integer;
+  v_added integer := 0;
+  v_cancelled integer := 0;
+  v_surplus integer := 0;
+  v_excess integer;
+begin
+  select quantity into v_qty from public.production_jobs where id = p_job_id;
+  if v_qty is null then return '{}'::jsonb; end if;
+
+  select count(*) into v_active from public.production_units
+  where production_job_id = p_job_id and status in ('pending', 'printing', 'printed', 'passed');
+
+  if v_active < v_qty then
+    select coalesce(max(unit_number), 0) into v_next from public.production_units where production_job_id = p_job_id;
+    insert into public.production_units (production_job_id, unit_number)
+    select p_job_id, v_next + g from generate_series(1, v_qty - v_active) g;
+    v_added := v_qty - v_active;
+  elsif v_active > v_qty then
+    v_excess := v_active - v_qty;
+    with picked as (
+      select id from public.production_units
+      where production_job_id = p_job_id and status = 'pending'
+      order by unit_number desc limit v_excess
+    )
+    update public.production_units u set status = 'cancelled', status_reason = coalesce(p_reason, 'Quantity reduced')
+    from picked where u.id = picked.id;
+    get diagnostics v_cancelled = row_count;
+    v_excess := v_excess - v_cancelled;
+    if v_excess > 0 then
+      with picked as (
+        select id from public.production_units
+        where production_job_id = p_job_id and status in ('printed', 'passed')
+        order by (status = 'passed'), unit_number desc limit v_excess
+      )
+      update public.production_units u set status = 'surplus', status_reason = coalesce(p_reason, 'Quantity reduced after printing')
+      from picked where u.id = picked.id;
+      get diagnostics v_surplus = row_count;
+    end if;
+  end if;
+  return jsonb_build_object('added', v_added, 'cancelled', v_cancelled, 'surplus', v_surplus);
+end;
+$$;
+
+create or replace function public.production_jobs_sync_units()
+returns trigger
+language plpgsql
+as $$
+begin
+  perform public.sync_job_units(new.id);
+  return null;
+end;
+$$;
+
+create trigger production_jobs_sync_units_insert
+  after insert on public.production_jobs
+  for each row execute function public.production_jobs_sync_units();
+create trigger production_jobs_sync_units_quantity
+  after update of quantity on public.production_jobs
+  for each row when (old.quantity is distinct from new.quantity)
+  execute function public.production_jobs_sync_units();
+
+-- When a job is moved to Ready to Pack / Dispatched / Completed, its printed
+-- units are treated as passed. Units that were never printed (e.g. supplied
+-- from stock) are flagged completed_without_print so history stays honest.
+create or replace function public.production_jobs_complete_units()
+returns trigger
+language plpgsql
+as $$
+begin
+  if new.stage in ('ready_to_pack', 'dispatched', 'completed')
+     and old.stage not in ('ready_to_pack', 'dispatched', 'completed') then
+    update public.production_units set
+      completed_without_print = (status = 'pending'),
+      status = 'passed',
+      passed_at = coalesce(passed_at, now())
+    where production_job_id = new.id and status in ('pending', 'printed');
+  end if;
+  return null;
+end;
+$$;
+
+create trigger production_jobs_complete_units
+  after update of stage on public.production_jobs
+  for each row when (old.stage is distinct from new.stage)
+  execute function public.production_jobs_complete_units();
+
+-- ---- Backfill existing jobs & runs (derived from current state) ----------------
+-- Insert units without firing the per-row counter trigger thousands of times.
+alter table public.production_units disable trigger production_units_after_write;
+
+insert into public.production_units (production_job_id, unit_number, status, printed_at, passed_at, last_print_run_id)
+select
+  j.id,
+  g,
+  case
+    when coalesce(case when j.stage = 'on_hold' then j.stage_before_hold end, j.stage) = 'printing' then 'printing'::public.unit_status
+    when coalesce(case when j.stage = 'on_hold' then j.stage_before_hold end, j.stage) = 'quality_check' then 'printed'::public.unit_status
+    when coalesce(case when j.stage = 'on_hold' then j.stage_before_hold end, j.stage) in ('ready_to_pack', 'dispatched', 'completed') then 'passed'::public.unit_status
+    else 'pending'::public.unit_status
+  end,
+  case when j.stage in ('quality_check', 'ready_to_pack', 'dispatched', 'completed') then coalesce(j.completed_at, j.updated_at) end,
+  case when j.stage in ('ready_to_pack', 'dispatched', 'completed') then coalesce(j.completed_at, j.updated_at) end,
+  (select r.id from public.print_runs r where r.production_job_id = j.id order by r.started_at desc limit 1)
+from public.production_jobs j
+cross join lateral generate_series(1, j.quantity) g
+where not exists (select 1 from public.production_units u where u.production_job_id = j.id);
+
+alter table public.production_units enable trigger production_units_after_write;
+
+-- Historical runs keep their record; link them to the job's units.
+insert into public.print_run_units (print_run_id, unit_id, outcome)
+select r.id, u.id,
+  case r.status when 'printing' then 'printing' when 'failed' then 'failed' else 'succeeded' end
+from public.print_runs r
+join public.production_units u on u.production_job_id = r.production_job_id and u.unit_number <= r.quantity
+where r.status in ('printing', 'succeeded', 'failed')
+on conflict do nothing;
+
+update public.print_runs set
+  quantity_succeeded = case status when 'succeeded' then quantity when 'failed' then 0 end,
+  quantity_failed = case status when 'failed' then quantity when 'succeeded' then 0 end
+where status in ('succeeded', 'failed') and quantity_succeeded is null;
+
+select public.refresh_job_unit_counts(id) from public.production_jobs;
+
+-- ---- Print workflow (replaces previous versions; old calls still work) -------
+drop function if exists public.start_print_run(uuid, uuid, integer);
+
+create or replace function public.start_print_run(
+  p_job_id uuid,
+  p_printer_id uuid,
+  p_quantity integer default null,
+  p_unit_ids uuid[] default null
+)
+returns uuid
+language plpgsql
+as $$
+declare
+  v_job record;
+  v_item record;
+  v_printer record;
+  v_run_id uuid;
+  v_minutes integer;
+  v_units uuid[];
+  v_n integer;
+begin
+  perform public.assert_can_write();
+  select * into v_job from public.production_jobs where id = p_job_id for update;
+  if v_job.id is null then raise exception 'Production job not found'; end if;
+  if v_job.cancelled_at is not null then
+    raise exception 'This job was closed because the order or item was cancelled';
+  end if;
+  if v_job.stage in ('dispatched', 'completed', 'on_hold') then
+    raise exception 'Job is %, it cannot be printed', public.stage_label(v_job.stage);
+  end if;
+  if p_quantity is not null and p_quantity < 1 then raise exception 'Choose at least one unit to print'; end if;
+
+  select * into v_printer from public.printers where id = p_printer_id and is_active for update;
+  if v_printer.id is null then raise exception 'Printer not found'; end if;
+  if v_printer.status in ('printing', 'paused') and v_printer.current_print_run_id is not null then
+    raise exception '% is already running a print', v_printer.name;
+  end if;
+  if v_printer.status in ('maintenance', 'offline') then
+    raise exception '% is %', v_printer.name, v_printer.status;
+  end if;
+
+  -- Which physical units go on this plate.
+  if p_unit_ids is not null then
+    select array_agg(id order by unit_number) into v_units
+    from public.production_units
+    where production_job_id = p_job_id and id = any(p_unit_ids) and status = 'pending';
+    if coalesce(array_length(v_units, 1), 0) <> coalesce(array_length(p_unit_ids, 1), 0) then
+      raise exception 'Only units waiting to be printed can be added to a print';
+    end if;
+  else
+    select array_agg(id order by unit_number) into v_units from (
+      select id, unit_number from public.production_units
+      where production_job_id = p_job_id and status = 'pending'
+      order by unit_number
+      limit coalesce(p_quantity, 2147483647)
+    ) s;
+  end if;
+  v_n := coalesce(array_length(v_units, 1), 0);
+  if v_n = 0 then raise exception 'Nothing left to print — every unit of this job has been printed'; end if;
+
+  select personalisation, variant_title into v_item from public.order_items where id = v_job.order_item_id;
+  -- Scale the estimate to the units on this plate.
+  v_minutes := case when v_job.estimated_print_minutes is not null and v_job.quantity > 0
+                    then ceil(v_job.estimated_print_minutes::numeric * v_n / v_job.quantity)::int end;
+
+  insert into public.print_runs (production_job_id, printer_id, attempt_number, quantity, estimated_minutes, started_by)
+  values (p_job_id, p_printer_id, v_job.attempt_count + 1, v_n, v_minutes, (select auth.uid()))
+  returning id into v_run_id;
+
+  update public.production_units set
+    status = 'printing', last_print_run_id = v_run_id,
+    printed_personalisation = v_item.personalisation, printed_variant = v_item.variant_title
+  where id = any(v_units);
+  insert into public.print_run_units (print_run_id, unit_id) select v_run_id, unnest(v_units);
+
+  update public.production_jobs
+  set stage = 'printing', printer_id = p_printer_id, attempt_count = attempt_count + 1
+  where id = p_job_id;
+
+  update public.printers
+  set status = 'printing', current_job_id = p_job_id, current_print_run_id = v_run_id,
+      estimated_completion_at = case when v_minutes is not null then now() + make_interval(mins => v_minutes) end
+  where id = p_printer_id;
+
+  update public.print_queue set status = 'removed'
+  where production_job_id = p_job_id and status = 'queued' and printer_id <> p_printer_id;
+  update public.print_queue set status = 'active'
+  where production_job_id = p_job_id and status = 'queued' and printer_id = p_printer_id;
+  if not found then
+    insert into public.print_queue (printer_id, production_job_id, status) values (p_printer_id, p_job_id, 'active')
+    on conflict do nothing;
+  end if;
+
+  perform public.log_activity('production_job', p_job_id, v_job.order_id, 'print.started',
+    v_job.job_number || ' started on ' || v_printer.name || ' (attempt ' || (v_job.attempt_count + 1) || ', '
+      || v_n || case when v_n = 1 then ' unit' else ' units' end || ')',
+    jsonb_build_object('print_run_id', v_run_id, 'printer_id', p_printer_id, 'units', v_n));
+  return v_run_id;
+end;
+$$;
+
+drop function if exists public.finish_print_run(uuid, boolean, text, text, boolean);
+
+-- Record the outcome of a print run. Supports partial plates: pass the failed
+-- unit ids (or a count) when only some units failed.
+create or replace function public.finish_print_run(
+  p_run_id uuid,
+  p_succeeded boolean,
+  p_failure_reason text default null,
+  p_notes text default null,
+  p_requeue boolean default true,
+  p_failed_unit_ids uuid[] default null,
+  p_failed_count integer default null
+)
+returns void
+language plpgsql
+as $$
+declare
+  v_run record;
+  v_job record;
+  v_printer_name text;
+  v_run_units uuid[];
+  v_failed uuid[];
+  v_n integer;
+  v_failed_n integer;
+  v_ok_n integer;
+  v_remaining integer;
+begin
+  perform public.assert_can_write();
+  select * into v_run from public.print_runs where id = p_run_id for update;
+  if v_run.id is null then raise exception 'Print run not found'; end if;
+  if v_run.status <> 'printing' then raise exception 'This print run has already finished'; end if;
+
+  select * into v_job from public.production_jobs where id = v_run.production_job_id for update;
+  select name into v_printer_name from public.printers where id = v_run.printer_id;
+
+  select array_agg(pru.unit_id order by u.unit_number) into v_run_units
+  from public.print_run_units pru join public.production_units u on u.id = pru.unit_id
+  where pru.print_run_id = p_run_id;
+  v_n := coalesce(array_length(v_run_units, 1), 0);
+
+  -- Which units failed?
+  if p_failed_unit_ids is not null then
+    select array_agg(x) into v_failed from unnest(p_failed_unit_ids) x where x = any(v_run_units);
+    if coalesce(array_length(v_failed, 1), 0) <> coalesce(array_length(p_failed_unit_ids, 1), 0) then
+      raise exception 'Some selected units were not on this print';
+    end if;
+  elsif p_failed_count is not null then
+    if p_failed_count < 0 or p_failed_count > v_n then raise exception 'Failed units must be between 0 and %', v_n; end if;
+    v_failed := v_run_units[greatest(v_n - p_failed_count + 1, 1):v_n];
+    if p_failed_count = 0 then v_failed := '{}'; end if;
+  elsif p_succeeded then
+    v_failed := '{}';
+  else
+    v_failed := v_run_units;
+  end if;
+  v_failed := coalesce(v_failed, '{}');
+  v_failed_n := coalesce(array_length(v_failed, 1), 0);
+  v_ok_n := v_n - v_failed_n;
+  if v_n = 0 then
+    -- Legacy run with no unit links: fall back to the all-or-nothing outcome.
+    v_failed_n := case when p_succeeded then 0 else v_run.quantity end;
+    v_ok_n := v_run.quantity - v_failed_n;
+  end if;
+
+  if v_failed_n > 0 and coalesce(trim(p_failure_reason), '') = '' then
+    raise exception 'A failure reason is required';
+  end if;
+
+  update public.print_runs
+  set status = case when v_ok_n = 0 then 'failed'::public.print_run_status else 'succeeded'::public.print_run_status end,
+      ended_at = now(),
+      quantity_succeeded = v_ok_n,
+      quantity_failed = v_failed_n,
+      failure_reason = case when v_failed_n > 0 then trim(p_failure_reason) end,
+      notes = coalesce(nullif(trim(p_notes), ''), notes),
+      ended_by = (select auth.uid())
+  where id = p_run_id;
+
+  update public.print_run_units set outcome = case when unit_id = any(v_failed) then 'failed' else 'succeeded' end
+  where print_run_id = p_run_id;
+
+  -- Succeeded units become printed; failed units go back to pending for a reprint.
+  update public.production_units set status = 'printed', printed_at = now()
+  where id = any(v_run_units) and not (id = any(v_failed)) and status = 'printing';
+  update public.production_units set status = 'pending', failed_attempts = failed_attempts + 1, status_reason = trim(p_failure_reason)
+  where id = any(v_failed) and status = 'printing';
+  if v_n = 0 and v_failed_n = 0 then
+    update public.production_units set status = 'printed', printed_at = now()
+    where production_job_id = v_job.id and status in ('pending', 'printing');
+  end if;
+
+  update public.printers
+  set status = 'available', current_job_id = null, current_print_run_id = null, estimated_completion_at = null
+  where id = v_run.printer_id and current_print_run_id = p_run_id;
+
+  select count(*) into v_remaining from public.production_units
+  where production_job_id = v_job.id and status in ('pending', 'printing');
+
+  if v_failed_n > 0 then
+    update public.production_jobs set failed_attempts = failed_attempts + 1 where id = v_job.id;
+  end if;
+
+  if v_remaining = 0 then
+    -- Everything printed → quality check (a job already further along stays put).
+    if v_job.stage in ('printing', 'ready_to_print', 'awaiting_preparation', 'new_order') then
+      update public.production_jobs set stage = 'quality_check' where id = v_job.id;
+    end if;
+    update public.print_queue set status = 'done' where production_job_id = v_job.id and status = 'active';
+  else
+    -- Units still to print: back to Ready to Print (a reprint of the SAME job).
+    if v_job.stage = 'printing' then
+      update public.production_jobs set stage = 'ready_to_print' where id = v_job.id;
+    end if;
+    if p_requeue and v_run.printer_id is not null then
+      update public.print_queue set status = 'queued', position = 0
+      where production_job_id = v_job.id and status = 'active';
+    else
+      update public.print_queue set status = 'removed' where production_job_id = v_job.id and status = 'active';
+    end if;
+  end if;
+
+  perform public.log_activity('production_job', v_job.id, v_job.order_id,
+    case when v_failed_n = 0 then 'print.succeeded' when v_ok_n = 0 then 'print.failed' else 'print.partial' end,
+    v_job.job_number || ' on ' || coalesce(v_printer_name, 'printer') || ': ' ||
+      case
+        when v_failed_n = 0 then v_ok_n || ' of ' || greatest(v_n, v_ok_n) || ' printed successfully'
+        when v_ok_n = 0 then 'print failed — ' || trim(p_failure_reason)
+        else v_ok_n || ' printed, ' || v_failed_n || ' failed — ' || trim(p_failure_reason)
+      end ||
+      case when v_remaining > 0 then ' (' || v_remaining || ' still to print)' else '' end,
+    jsonb_build_object('print_run_id', p_run_id, 'succeeded', v_ok_n, 'failed', v_failed_n, 'remaining', v_remaining,
+                       'reason', nullif(trim(coalesce(p_failure_reason, '')), '')));
+end;
+$$;
+
+-- Quality-check failure for specific printed units (or a count): they go back
+-- to pending for a reprint and the job returns to Ready to Print. Human action.
+create or replace function public.record_qc_failure(
+  p_job_id uuid,
+  p_reason text,
+  p_unit_ids uuid[] default null,
+  p_count integer default null
+)
+returns integer
+language plpgsql
+as $$
+declare
+  v_job record;
+  v_units uuid[];
+  v_n integer;
+begin
+  perform public.assert_can_write();
+  if coalesce(trim(p_reason), '') = '' then raise exception 'Describe why the unit failed quality check'; end if;
+  select * into v_job from public.production_jobs where id = p_job_id for update;
+  if v_job.id is null then raise exception 'Production job not found'; end if;
+
+  if p_unit_ids is not null then
+    select array_agg(id) into v_units from public.production_units
+    where production_job_id = p_job_id and id = any(p_unit_ids) and status in ('printed', 'passed');
+  else
+    select array_agg(id) into v_units from (
+      select id from public.production_units where production_job_id = p_job_id and status in ('printed', 'passed')
+      order by unit_number desc limit coalesce(p_count, 1)
+    ) s;
+  end if;
+  v_n := coalesce(array_length(v_units, 1), 0);
+  if v_n = 0 then raise exception 'No printed units to fail'; end if;
+
+  update public.production_units
+  set status = 'pending', failed_attempts = failed_attempts + 1, status_reason = 'QC: ' || trim(p_reason), passed_at = null
+  where id = any(v_units);
+
+  if v_job.stage in ('quality_check', 'ready_to_pack') then
+    update public.production_jobs set stage = 'ready_to_print' where id = p_job_id;
+  end if;
+
+  perform public.log_activity('production_job', p_job_id, v_job.order_id, 'qc.failed',
+    v_job.job_number || ': ' || v_n || case when v_n = 1 then ' unit' else ' units' end || ' failed quality check — ' || trim(p_reason),
+    jsonb_build_object('units', v_n, 'reason', trim(p_reason)));
+  return v_n;
+end;
+$$;
+
+-- Read-only helper for the UI: units still to print for a job.
+create or replace function public.job_outstanding_units(p_job_id uuid)
+returns integer
+language sql
+stable
+as $$
+  select count(*)::int from public.production_units where production_job_id = p_job_id and status in ('pending', 'printing');
+$$;
+
+
+-- ============================================================
+-- 20261119000003_order_reconciliation.sql
+-- ============================================================
+-- =============================================================================
+-- PrintFlow — Phase 2: cancellations, line-item reconciliation, production safety
+-- -----------------------------------------------------------------------------
+-- Principles:
+--   * A marketplace update never discards physical work, never moves a job
+--     backwards, and never removes a printer assignment or print history.
+--   * Changes that are safe are applied automatically and recorded.
+--   * Changes that affect work already done are flagged for a human decision
+--     (order_reviews, severity = action_required) and block packing/dispatch.
+--   * The same marketplace update received twice never records anything twice.
+-- Additive: new table/columns; replaced functions keep compatible signatures.
+-- =============================================================================
+
+-- ---- Review records ---------------------------------------------------------
+create table public.order_reviews (
+  id uuid primary key default gen_random_uuid(),
+  order_id uuid not null references public.orders (id) on delete cascade,
+  order_item_id uuid references public.order_items (id) on delete cascade,
+  production_job_id uuid references public.production_jobs (id) on delete set null,
+  kind text not null check (kind in (
+    'order_cancelled', 'order_cancelled_after_dispatch', 'fulfilled_externally_during_production',
+    'item_added', 'item_removed', 'quantity_increased', 'quantity_decreased',
+    'personalisation_changed', 'variation_changed'
+  )),
+  severity text not null check (severity in ('info', 'action_required')),
+  status text not null default 'open' check (status in ('open', 'resolved')),
+  title text not null,
+  message text not null,
+  details jsonb not null default '{}'::jsonb,
+  -- Identifies one specific change so the same update is never recorded twice.
+  fingerprint text not null,
+  source text not null default 'marketplace' check (source in ('marketplace', 'printflow')),
+  detected_at timestamptz not null default now(),
+  resolution text check (resolution in ('auto_applied', 'acknowledged', 'jobs_closed', 'reprint_requested', 'returned_to_production')),
+  resolution_note text,
+  resolved_at timestamptz,
+  resolved_by uuid references public.profiles (id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (order_id, fingerprint)
+);
+create index order_reviews_open_idx on public.order_reviews (status, severity, detected_at desc);
+create index order_reviews_order_idx on public.order_reviews (order_id, detected_at desc);
+
+create trigger order_reviews_set_updated_at
+  before update on public.order_reviews
+  for each row execute function public.set_updated_at();
+
+alter table public.order_reviews enable row level security;
+create policy order_reviews_select on public.order_reviews for select to authenticated using (public.is_team_member());
+-- Writes go through the SQL functions below (security invoker → caller's rights).
+create policy order_reviews_write on public.order_reviews for all to authenticated using (public.can_write()) with check (public.can_write());
+
+alter table public.orders
+  add column requires_review boolean not null default false,
+  add column marketplace_amended_at timestamptz;
+create index orders_requires_review_idx on public.orders (requires_review) where requires_review;
+
+alter table public.order_items
+  add column marketplace_status text not null default 'active' check (marketplace_status in ('active', 'removed')),
+  add column removed_at timestamptz,
+  add column personalisation_changed_at timestamptz;
+
+-- Keep orders.requires_review in step with open action_required reviews.
+create or replace function public.order_reviews_after_write()
+returns trigger
+language plpgsql
+as $$
+declare
+  v_order uuid := coalesce(new.order_id, old.order_id);
+begin
+  update public.orders o
+  set requires_review = exists (
+    select 1 from public.order_reviews r
+    where r.order_id = v_order and r.status = 'open' and r.severity = 'action_required'
+  )
+  where o.id = v_order;
+  return null;
+end;
+$$;
+
+create trigger order_reviews_after_write
+  after insert or update or delete on public.order_reviews
+  for each row execute function public.order_reviews_after_write();
+
+-- Record a review once (dedupe on fingerprint). Info reviews are recorded as
+-- already applied; action_required reviews stay open until a person decides.
+create or replace function public.raise_order_review(
+  p_order_id uuid,
+  p_item_id uuid,
+  p_job_id uuid,
+  p_kind text,
+  p_severity text,
+  p_title text,
+  p_message text,
+  p_details jsonb,
+  p_fingerprint text,
+  p_source text default 'marketplace',
+  p_actor_label text default null
+)
+returns boolean
+language plpgsql
+as $$
+declare
+  v_id uuid;
+begin
+  insert into public.order_reviews (
+    order_id, order_item_id, production_job_id, kind, severity, status, title, message, details, fingerprint, source,
+    resolution, resolved_at
+  ) values (
+    p_order_id, p_item_id, p_job_id, p_kind, p_severity,
+    case when p_severity = 'info' then 'resolved' else 'open' end,
+    p_title, p_message, coalesce(p_details, '{}'::jsonb), p_fingerprint, p_source,
+    case when p_severity = 'info' then 'auto_applied' end,
+    case when p_severity = 'info' then now() end
+  )
+  on conflict (order_id, fingerprint) do nothing
+  returning id into v_id;
+
+  if v_id is not null then
+    perform public.log_activity('order', p_order_id, p_order_id,
+      case when p_severity = 'info' then 'order.amended' else 'order.review_required' end,
+      p_title || ' — ' || p_message,
+      jsonb_build_object('review_id', v_id, 'kind', p_kind) || coalesce(p_details, '{}'::jsonb),
+      p_actor_label);
+  end if;
+  return v_id is not null;
+end;
+$$;
+
+-- Has physical work started on this job? (printing, printed or further along)
+create or replace function public.job_has_physical_work(p_job public.production_jobs)
+returns boolean
+language sql
+stable
+as $$
+  select p_job.quantity_printing > 0 or p_job.quantity_printed > 0 or p_job.quantity_surplus > 0
+      or p_job.stage in ('printing', 'quality_check', 'ready_to_pack', 'dispatched', 'completed')
+      or exists (select 1 from public.print_runs r where r.production_job_id = p_job.id and r.status = 'printing');
+$$;
+
+-- Close a job that hasn't produced anything: cancel its units, take it off
+-- printer queues. Stage and history are left untouched.
+create or replace function public.close_unstarted_job(p_job_id uuid, p_reason text)
+returns void
+language plpgsql
+as $$
+begin
+  update public.production_units set status = 'cancelled', status_reason = p_reason
+  where production_job_id = p_job_id and status = 'pending';
+  update public.print_queue set status = 'removed' where production_job_id = p_job_id and status = 'queued';
+  update public.production_jobs set cancelled_at = now(), cancellation_reason = p_reason
+  where id = p_job_id and cancelled_at is null;
+end;
+$$;
+
+-- ---- Cancellation (marketplace and in-app share one safe path) ---------------
+create or replace function public.apply_order_cancellation(
+  p_order_id uuid,
+  p_source text,
+  p_reason text default null,
+  p_actor_label text default null
+)
+returns jsonb
+language plpgsql
+as $$
+declare
+  v_order record;
+  v_job public.production_jobs;
+  v_closed integer := 0;
+  v_dequeued integer := 0;
+  v_affected jsonb := '[]'::jsonb;
+  v_where text;
+  v_printer text;
+  v_reason text := 'Order cancelled' || case when p_source = 'marketplace' then ' on marketplace' else '' end;
+  v_msg text;
+begin
+  if p_source = 'printflow' then perform public.assert_can_write(); end if;
+  select * into v_order from public.orders where id = p_order_id for update;
+  if v_order.id is null then raise exception 'Order not found'; end if;
+  if v_order.status = 'cancelled' then
+    return jsonb_build_object('already_cancelled', true);
+  end if;
+
+  -- Already shipped: never rewrite history. Flag for refund/return handling.
+  if v_order.status in ('dispatched', 'completed') then
+    perform public.raise_order_review(p_order_id, null, null, 'order_cancelled_after_dispatch', 'action_required',
+      'Cancelled after dispatch',
+      'The order was cancelled ' || case when p_source = 'marketplace' then 'on the marketplace ' else '' end ||
+        'after it was dispatched. Check whether a return or refund is needed. Shipping history is unchanged.',
+      jsonb_build_object('status_at_cancellation', v_order.status, 'reason', p_reason),
+      'cancelled_after_dispatch', p_source, p_actor_label);
+    return jsonb_build_object('status_kept', v_order.status);
+  end if;
+
+  update public.orders set status = 'cancelled' where id = p_order_id;
+
+  for v_job in select * from public.production_jobs where order_id = p_order_id and cancelled_at is null order by created_at
+  loop
+    if public.job_has_physical_work(v_job) then
+      select p.name into v_printer from public.print_runs r join public.printers p on p.id = r.printer_id
+      where r.production_job_id = v_job.id and r.status = 'printing' limit 1;
+      v_where := case
+        when v_printer is not null then 'printing on ' || v_printer
+        when v_job.stage in ('ready_to_pack', 'dispatched', 'completed') then 'finished and ready to pack'
+        when v_job.quantity_printed > 0 then v_job.quantity_printed || ' of ' || v_job.quantity || ' printed'
+        else public.stage_label(v_job.stage)
+      end;
+      v_affected := v_affected || jsonb_build_object('job_id', v_job.id, 'job_number', v_job.job_number, 'state', v_where,
+        'printing_on', v_printer, 'printed', v_job.quantity_printed);
+    else
+      select count(*) into v_dequeued from public.print_queue where production_job_id = v_job.id and status = 'queued';
+      perform public.close_unstarted_job(v_job.id, v_reason);
+      v_closed := v_closed + 1;
+    end if;
+  end loop;
+
+  if jsonb_array_length(v_affected) = 0 and v_order.status <> 'packed' then
+    perform public.raise_order_review(p_order_id, null, null, 'order_cancelled', 'info',
+      'Order cancelled before production',
+      v_closed || ' production job' || case when v_closed = 1 then ' was' else 's were' end || ' closed' ||
+        case when v_dequeued > 0 then ' and removed from printer queues' else '' end || '. Nothing had been printed.',
+      jsonb_build_object('jobs_closed', v_closed, 'reason', p_reason),
+      'cancelled', p_source, p_actor_label);
+  else
+    v_msg := case when v_order.status = 'packed'
+      then 'The order was already packed — unpack it and do not ship. '
+      else '' end ||
+      case when jsonb_array_length(v_affected) > 0
+        then 'Work already done: ' || (select string_agg((a ->> 'job_number') || ' (' || (a ->> 'state') || ')', ', ') from jsonb_array_elements(v_affected) a) ||
+             '. Nothing has been discarded — decide whether to keep the items as stock or scrap them.'
+        else '' end;
+    perform public.raise_order_review(p_order_id, null, null, 'order_cancelled', 'action_required',
+      case when v_order.status = 'packed' then 'Cancelled after packing' else 'Cancelled during production' end,
+      trim(v_msg),
+      jsonb_build_object('jobs', v_affected, 'jobs_closed', v_closed, 'status_at_cancellation', v_order.status, 'reason', p_reason),
+      'cancelled', p_source, p_actor_label);
+  end if;
+
+  perform public.log_activity('order', p_order_id, p_order_id,
+    case when p_source = 'marketplace' then 'order.cancelled_on_marketplace' else 'order.cancelled' end,
+    v_reason || coalesce(': ' || nullif(trim(p_reason), ''), ''), '{}'::jsonb, p_actor_label);
+  return jsonb_build_object('jobs_closed', v_closed, 'jobs_needing_decision', jsonb_array_length(v_affected));
+end;
+$$;
+
+-- Reopen a cancelled order (in-app). Jobs closed by the cancellation reopen;
+-- open cancellation reviews are resolved.
+create or replace function public.reopen_cancelled_order(p_order_id uuid)
+returns void
+language plpgsql
+as $$
+declare
+  v_job record;
+begin
+  perform public.assert_can_write();
+  update public.orders set status = 'new' where id = p_order_id and status = 'cancelled';
+  if not found then raise exception 'Only cancelled orders can be reopened'; end if;
+  for v_job in select id from public.production_jobs where order_id = p_order_id and cancellation_reason like 'Order cancelled%'
+  loop
+    update public.production_jobs set cancelled_at = null, cancellation_reason = null where id = v_job.id;
+    update public.production_units set status = 'pending', status_reason = null
+    where production_job_id = v_job.id and status = 'cancelled' and status_reason like 'Order cancelled%';
+    perform public.sync_job_units(v_job.id);
+  end loop;
+  update public.order_reviews set status = 'resolved', resolution = 'acknowledged', resolution_note = 'Order reopened',
+    resolved_at = now(), resolved_by = (select auth.uid())
+  where order_id = p_order_id and kind = 'order_cancelled' and status = 'open';
+  perform public.refresh_order_status(p_order_id);
+  perform public.log_activity('order', p_order_id, p_order_id, 'order.reopened', 'Cancelled order reopened');
+end;
+$$;
+
+-- ---- Resolving reviews (always an explicit human action) ----------------------
+create or replace function public.resolve_order_review(p_review_id uuid, p_resolution text, p_note text default null)
+returns jsonb
+language plpgsql
+as $$
+declare
+  v_review record;
+  v_job public.production_jobs;
+  v_n integer := 0;
+  v_jobs uuid[];
+  v_item record;
+begin
+  perform public.assert_can_write();
+  select * into v_review from public.order_reviews where id = p_review_id for update;
+  if v_review.id is null then raise exception 'Review not found'; end if;
+  if v_review.status = 'resolved' then raise exception 'This change has already been resolved'; end if;
+  if p_resolution not in ('acknowledged', 'jobs_closed', 'reprint_requested', 'returned_to_production') then
+    raise exception 'Unknown resolution';
+  end if;
+
+  -- Jobs this review concerns.
+  if v_review.production_job_id is not null then
+    v_jobs := array[v_review.production_job_id];
+  elsif v_review.order_item_id is not null then
+    select array_agg(id) into v_jobs from public.production_jobs where order_item_id = v_review.order_item_id;
+  else
+    select array_agg(id) into v_jobs from public.production_jobs where order_id = v_review.order_id and cancelled_at is null;
+  end if;
+
+  if p_resolution = 'jobs_closed' then
+    if v_review.kind not in ('order_cancelled', 'item_removed', 'quantity_decreased') then
+      raise exception 'Closing jobs only applies to cancellations and removed items';
+    end if;
+    if exists (select 1 from public.print_runs r where r.production_job_id = any(v_jobs) and r.status = 'printing') then
+      raise exception 'A print is still running for this order. Record the print as completed or failed first.';
+    end if;
+    for v_job in select * from public.production_jobs where id = any(v_jobs) and cancelled_at is null
+    loop
+      -- Printed items physically exist: keep them as surplus (stock/scrap decision is the note).
+      update public.production_units set status = 'surplus', status_reason = 'Kept after cancellation'
+      where production_job_id = v_job.id and status in ('printed', 'passed');
+      perform public.close_unstarted_job(v_job.id, 'Closed after review: ' || coalesce(nullif(trim(p_note), ''), v_review.title));
+      v_n := v_n + 1;
+    end loop;
+    if v_review.kind = 'order_cancelled' then
+      update public.shipments set status = 'cancelled' where order_id = v_review.order_id and status in ('pending', 'packed');
+    end if;
+  elsif p_resolution = 'reprint_requested' then
+    if v_review.kind not in ('personalisation_changed', 'variation_changed') then
+      raise exception 'Reprinting only applies to personalisation or variation changes';
+    end if;
+    select personalisation, variant_title into v_item from public.order_items where id = v_review.order_item_id;
+    update public.production_units u set status = 'pending', status_reason = 'Reprint: ' || v_review.title, passed_at = null
+    from public.production_jobs j
+    where j.id = u.production_job_id and j.id = any(v_jobs) and u.status in ('printed', 'passed')
+      and (u.printed_personalisation is distinct from v_item.personalisation
+           or u.printed_variant is distinct from v_item.variant_title
+           or u.printed_personalisation is null);
+    get diagnostics v_n = row_count;
+    update public.production_jobs set stage = 'ready_to_print'
+    where id = any(v_jobs) and stage in ('quality_check', 'ready_to_pack') and cancelled_at is null;
+  elsif p_resolution = 'returned_to_production' then
+    update public.production_jobs set stage = 'ready_to_print'
+    where id = any(v_jobs) and stage in ('quality_check', 'ready_to_pack') and quantity_pending > 0 and cancelled_at is null;
+    get diagnostics v_n = row_count;
+  end if;
+
+  update public.order_reviews
+  set status = 'resolved', resolution = p_resolution, resolution_note = nullif(trim(p_note), ''),
+      resolved_at = now(), resolved_by = (select auth.uid())
+  where id = p_review_id;
+
+  perform public.refresh_order_status(v_review.order_id);
+  perform public.log_activity('order', v_review.order_id, v_review.order_id, 'order.review_resolved',
+    v_review.title || ' — ' || case p_resolution
+      when 'acknowledged' then 'acknowledged'
+      when 'jobs_closed' then v_n || ' job' || case when v_n = 1 then '' else 's' end || ' closed (printed items kept as surplus)'
+      when 'reprint_requested' then v_n || ' unit' || case when v_n = 1 then '' else 's' end || ' sent for reprint'
+      when 'returned_to_production' then 'returned to production'
+    end || coalesce(': ' || nullif(trim(p_note), ''), ''),
+    jsonb_build_object('review_id', p_review_id, 'resolution', p_resolution));
+  return jsonb_build_object('affected', v_n);
+end;
+$$;
+
+-- ---- Order status derivation ignores closed jobs -------------------------------
+create or replace function public.refresh_order_status(p_order_id uuid)
+returns void
+language plpgsql
+as $$
+declare
+  v_status public.order_status;
+  v_total integer;
+  v_ready integer;
+  v_progress integer;
+  v_new public.order_status;
+begin
+  select status into v_status from public.orders where id = p_order_id;
+  if v_status is null or v_status in ('cancelled', 'dispatched', 'completed', 'on_hold') then
+    return;
+  end if;
+
+  select
+    count(*),
+    count(*) filter (where stage in ('ready_to_pack', 'dispatched', 'completed')),
+    count(*) filter (where stage in ('awaiting_preparation', 'ready_to_print', 'printing', 'quality_check'))
+  into v_total, v_ready, v_progress
+  from public.production_jobs
+  where order_id = p_order_id and cancelled_at is null;
+
+  if v_total = 0 then
+    return;
+  end if;
+
+  if v_ready = v_total then
+    v_new := case when v_status = 'packed' then 'packed'::public.order_status else 'ready_to_pack'::public.order_status end;
+  elsif v_progress > 0 or v_ready > 0 then
+    v_new := 'in_production';
+  else
+    v_new := 'new';
+  end if;
+
+  if v_new is distinct from v_status then
+    update public.orders set status = v_new where id = p_order_id;
+  end if;
+end;
+$$;
+
+-- Re-derive status when a job is closed/reopened.
+create or replace function public.production_jobs_after_cancel()
+returns trigger
+language plpgsql
+as $$
+begin
+  perform public.refresh_order_status(new.order_id);
+  return null;
+end;
+$$;
+create trigger production_jobs_after_cancel
+  after update of cancelled_at on public.production_jobs
+  for each row when (old.cancelled_at is distinct from new.cancelled_at)
+  execute function public.production_jobs_after_cancel();
+
+-- ---- Packing & dispatch guards -----------------------------------------------------
+create or replace function public.assert_order_shippable(p_order_id uuid)
+returns void
+language plpgsql
+as $$
+declare
+  v_outstanding integer;
+begin
+  if exists (select 1 from public.orders where id = p_order_id and requires_review) then
+    raise exception 'This order has marketplace changes that need a decision. Resolve them on the order page before packing or dispatching.';
+  end if;
+  select coalesce(sum(quantity_pending + quantity_printing), 0) into v_outstanding
+  from public.production_jobs where order_id = p_order_id and cancelled_at is null;
+  if v_outstanding > 0 then
+    raise exception '% unit% still need printing before this order can be packed', v_outstanding, case when v_outstanding = 1 then '' else 's' end;
+  end if;
+end;
+$$;
+
+create or replace function public.mark_order_packed(p_order_id uuid, p_checklist jsonb, p_packaging_notes text default null)
+returns uuid
+language plpgsql
+as $$
+declare
+  v_order record;
+  v_shipment_id uuid;
+begin
+  perform public.assert_can_write();
+  select * into v_order from public.orders where id = p_order_id for update;
+  if v_order.id is null then raise exception 'Order not found'; end if;
+  if v_order.status not in ('ready_to_pack', 'packed') then
+    raise exception 'Order is not ready to pack';
+  end if;
+  perform public.assert_order_shippable(p_order_id);
+
+  select id into v_shipment_id from public.shipments
+  where order_id = p_order_id and status in ('pending', 'packed')
+  order by created_at desc limit 1;
+
+  if v_shipment_id is null then
+    insert into public.shipments (order_id, status, shipping_method, checklist, packaging_notes, packed_at, packed_by)
+    values (p_order_id, 'packed', v_order.shipping_method, coalesce(p_checklist, '[]'::jsonb),
+            nullif(trim(p_packaging_notes), ''), now(), (select auth.uid()))
+    returning id into v_shipment_id;
+  else
+    update public.shipments
+    set status = 'packed', checklist = coalesce(p_checklist, checklist),
+        packaging_notes = coalesce(nullif(trim(p_packaging_notes), ''), packaging_notes),
+        packed_at = now(), packed_by = (select auth.uid())
+    where id = v_shipment_id;
+  end if;
+
+  update public.orders set status = 'packed' where id = p_order_id;
+  perform public.log_activity('order', p_order_id, p_order_id, 'order.packed', 'Order packed');
+  return v_shipment_id;
+end;
+$$;
+
+create or replace function public.mark_order_dispatched(
+  p_order_id uuid,
+  p_carrier text,
+  p_tracking_number text,
+  p_shipping_method text default null,
+  p_tracking_url text default null,
+  p_shipping_cost numeric default null,
+  p_dispatched_at timestamptz default null
+)
+returns uuid
+language plpgsql
+as $$
+declare
+  v_order record;
+  v_shipment_id uuid;
+  v_when timestamptz := coalesce(p_dispatched_at, now());
+begin
+  perform public.assert_can_write();
+  select * into v_order from public.orders where id = p_order_id for update;
+  if v_order.id is null then raise exception 'Order not found'; end if;
+  if v_order.status not in ('ready_to_pack', 'packed') then
+    raise exception 'Only packed or ready-to-pack orders can be dispatched';
+  end if;
+  perform public.assert_order_shippable(p_order_id);
+
+  select id into v_shipment_id from public.shipments
+  where order_id = p_order_id and status in ('pending', 'packed')
+  order by created_at desc limit 1;
+
+  if v_shipment_id is null then
+    insert into public.shipments (order_id, status) values (p_order_id, 'pending') returning id into v_shipment_id;
+  end if;
+
+  update public.shipments set
+    status = 'dispatched',
+    carrier = nullif(trim(p_carrier), ''),
+    tracking_number = nullif(trim(p_tracking_number), ''),
+    tracking_url = nullif(trim(p_tracking_url), ''),
+    shipping_method = coalesce(nullif(trim(p_shipping_method), ''), shipping_method, v_order.shipping_method),
+    shipping_cost = p_shipping_cost,
+    packed_at = coalesce(packed_at, v_when),
+    packed_by = coalesce(packed_by, (select auth.uid())),
+    dispatched_at = v_when,
+    dispatched_by = (select auth.uid()),
+    marketplace_push_status = case when v_order.source = 'manual' or v_order.is_sample then 'not_required'::public.marketplace_push_status
+                                   else 'pending'::public.marketplace_push_status end
+  where id = v_shipment_id;
+
+  update public.orders set
+    status = 'dispatched',
+    dispatched_at = v_when,
+    carrier = nullif(trim(p_carrier), ''),
+    tracking_number = nullif(trim(p_tracking_number), '')
+  where id = p_order_id;
+
+  update public.production_jobs set stage = 'dispatched'
+  where order_id = p_order_id and stage not in ('dispatched', 'completed') and cancelled_at is null;
+
+  perform public.log_activity('order', p_order_id, p_order_id, 'order.dispatched',
+    'Order dispatched' || coalesce(' via ' || nullif(trim(p_carrier), ''), '') ||
+    coalesce(' — tracking ' || nullif(trim(p_tracking_number), ''), ''));
+  return v_shipment_id;
+end;
+$$;
+
+-- ---- Ingest with line-item reconciliation ----------------------------------------
+drop function if exists public.ingest_marketplace_order(public.order_source, jsonb, jsonb, text, boolean);
+
+create or replace function public.ingest_marketplace_order(
+  p_source public.order_source,
+  p_order jsonb,
+  p_items jsonb,
+  p_actor_label text default null,
+  p_force boolean default false
+)
+returns jsonb
+language plpgsql
+as $$
+declare
+  v_ext_id text := p_order ->> 'external_order_id';
+  v_existing record;
+  v_customer_id uuid;
+  v_ext_customer text := nullif(p_order #>> '{customer,external_id}', '');
+  v_email text := nullif(lower(trim(coalesce(p_order ->> 'customer_email', ''))), '');
+  v_name text := coalesce(nullif(trim(p_order ->> 'customer_name'), ''), 'Unknown customer');
+  v_addr jsonb := coalesce(p_order -> 'shipping_address', '{}'::jsonb);
+  v_mp_updated timestamptz := nullif(p_order ->> 'marketplace_updated_at', '')::timestamptz;
+  v_cancelled timestamptz := nullif(p_order ->> 'marketplace_cancelled_at', '')::timestamptz;
+  v_fulfilled boolean := coalesce((p_order ->> 'is_fulfilled')::boolean, false);
+  v_items_complete boolean := coalesce((p_order ->> 'items_complete')::boolean, false);
+  v_restricted boolean := coalesce(p_order ->> 'customer_data_status', 'available') = 'restricted';
+  v_restricted_fields text[] := coalesce(
+    (select array_agg(value) from jsonb_array_elements_text(coalesce(p_order -> 'customer_data_restricted_fields', '[]'::jsonb))),
+    '{}'
+  );
+  v_keep_customer boolean;
+  v_before text;
+  v_after text;
+  v_order_id uuid;
+  v_inserted boolean;
+  v_item jsonb;
+  v_old record;
+  v_job public.production_jobs;
+  v_product_id uuid;
+  v_status public.order_status;
+  v_listing_source public.integration_provider;
+  v_qty integer;
+  v_line text;
+  v_seen text[] := '{}';
+  v_removed_lines text[] := '{}';
+  v_started boolean;
+  v_shipped_state boolean;
+  v_sync jsonb;
+  v_changes integer := 0;
+  v_printing jsonb;
+  v_label text := initcap(p_source::text);
+begin
+  if p_source = 'manual' then
+    raise exception 'ingest_marketplace_order is for marketplace orders only';
+  end if;
+  if v_ext_id is null or v_ext_id = '' then
+    raise exception 'external_order_id is required';
+  end if;
+  v_listing_source := p_source::text::public.integration_provider;
+
+  select id, marketplace_updated_at, status, customer_id, customer_data_status
+  into v_existing
+  from public.orders
+  where source = p_source and external_order_id = v_ext_id;
+
+  if not p_force
+     and v_existing.id is not null and v_mp_updated is not null
+     and v_existing.marketplace_updated_at is not null
+     and v_mp_updated <= v_existing.marketplace_updated_at
+     and not (v_existing.customer_data_status = 'restricted' and not v_restricted) then
+    update public.orders set last_synced_at = now() where id = v_existing.id;
+    return jsonb_build_object('order_id', v_existing.id, 'result', 'unchanged');
+  end if;
+
+  v_keep_customer := v_restricted and v_existing.id is not null and v_existing.customer_data_status = 'available';
+  v_shipped_state := v_existing.status in ('packed', 'dispatched', 'completed');
+
+  if v_existing.id is not null and p_force then
+    v_before := public.marketplace_order_fingerprint(v_existing.id);
+  end if;
+
+  -- ---- Customer resolution (skipped when the marketplace withheld it) -------
+  v_customer_id := v_existing.customer_id;
+  if not v_restricted then
+    if v_customer_id is null and v_ext_customer is not null then
+      select customer_id into v_customer_id from public.customer_identities
+      where source = p_source and external_customer_id = v_ext_customer;
+    end if;
+    if v_customer_id is null and v_email is not null then
+      select id into v_customer_id from public.customers where lower(email) = v_email order by created_at limit 1;
+    end if;
+    if v_customer_id is null then
+      insert into public.customers (display_name, email, first_source) values (v_name, v_email, p_source)
+      returning id into v_customer_id;
+    elsif v_email is not null then
+      update public.customers set email = coalesce(email, v_email) where id = v_customer_id;
+    end if;
+    if v_ext_customer is not null then
+      insert into public.customer_identities (customer_id, source, external_customer_id)
+      values (v_customer_id, p_source, v_ext_customer)
+      on conflict (source, external_customer_id) do nothing;
+    end if;
+    if coalesce(v_addr ->> 'line1', '') <> '' then
+      insert into public.customer_addresses (customer_id, name, line1, line2, city, region, postal_code, country_code, phone)
+      values (v_customer_id, v_addr ->> 'name', v_addr ->> 'line1', v_addr ->> 'line2', v_addr ->> 'city',
+              v_addr ->> 'region', v_addr ->> 'postal_code', v_addr ->> 'country_code', v_addr ->> 'phone')
+      on conflict (customer_id, fingerprint) do update set last_used_at = now();
+    end if;
+  end if;
+
+  -- ---- Order upsert ---------------------------------------------------------
+  v_status := case
+    when v_cancelled is not null then 'cancelled'::public.order_status
+    when v_fulfilled then 'completed'::public.order_status
+    else 'new'::public.order_status
+  end;
+
+  insert into public.orders (
+    source, external_order_id, external_order_number, customer_id, customer_name, customer_email,
+    shipping_address, order_date, payment_status, marketplace_status, marketplace_fulfilment_status,
+    currency, subtotal, shipping_total, tax_total, discount_total, total, customer_note,
+    shipping_method, marketplace_dispatch_by, marketplace_updated_at, marketplace_cancelled_at,
+    last_synced_at, status, dispatch_by, completed_at, customer_data_status, customer_data_restricted_fields
+  ) values (
+    p_source, v_ext_id, p_order ->> 'external_order_number', v_customer_id, v_name, v_email,
+    v_addr, coalesce(nullif(p_order ->> 'order_date', '')::timestamptz, now()),
+    coalesce(nullif(p_order ->> 'payment_status', ''), 'unknown')::public.payment_status,
+    p_order ->> 'marketplace_status', p_order ->> 'marketplace_fulfilment_status',
+    coalesce(nullif(p_order ->> 'currency', ''), 'GBP'),
+    coalesce((p_order ->> 'subtotal')::numeric, 0), coalesce((p_order ->> 'shipping_total')::numeric, 0),
+    coalesce((p_order ->> 'tax_total')::numeric, 0), coalesce((p_order ->> 'discount_total')::numeric, 0),
+    coalesce((p_order ->> 'total')::numeric, 0), nullif(p_order ->> 'customer_note', ''),
+    nullif(p_order ->> 'shipping_method', ''), nullif(p_order ->> 'marketplace_dispatch_by', '')::timestamptz,
+    v_mp_updated, v_cancelled, now(), v_status,
+    coalesce(nullif(p_order ->> 'marketplace_dispatch_by', '')::timestamptz, nullif(p_order ->> 'default_dispatch_by', '')::timestamptz),
+    case when v_status = 'completed' then now() end,
+    case when v_restricted then 'restricted' else 'available' end,
+    v_restricted_fields
+  )
+  on conflict (source, external_order_id) do update set
+    external_order_number = excluded.external_order_number,
+    customer_id = coalesce(public.orders.customer_id, excluded.customer_id),
+    customer_name = case when v_keep_customer then public.orders.customer_name else excluded.customer_name end,
+    customer_email = case when v_keep_customer then public.orders.customer_email
+                          else coalesce(excluded.customer_email, public.orders.customer_email) end,
+    shipping_address = case when v_keep_customer then public.orders.shipping_address else excluded.shipping_address end,
+    customer_data_status = case when v_keep_customer then public.orders.customer_data_status else excluded.customer_data_status end,
+    customer_data_restricted_fields = case when v_keep_customer then public.orders.customer_data_restricted_fields
+                                           else excluded.customer_data_restricted_fields end,
+    order_date = excluded.order_date,
+    payment_status = excluded.payment_status,
+    marketplace_status = excluded.marketplace_status,
+    marketplace_fulfilment_status = excluded.marketplace_fulfilment_status,
+    currency = excluded.currency,
+    subtotal = excluded.subtotal,
+    shipping_total = excluded.shipping_total,
+    tax_total = excluded.tax_total,
+    discount_total = excluded.discount_total,
+    total = excluded.total,
+    customer_note = excluded.customer_note,
+    shipping_method = excluded.shipping_method,
+    marketplace_dispatch_by = excluded.marketplace_dispatch_by,
+    marketplace_updated_at = greatest(public.orders.marketplace_updated_at, excluded.marketplace_updated_at),
+    marketplace_cancelled_at = excluded.marketplace_cancelled_at,
+    last_synced_at = now(),
+    dispatch_by = coalesce(public.orders.dispatch_by, excluded.dispatch_by)
+  returning id, (xmax = 0) into v_order_id, v_inserted;
+
+  -- ---- Line items: insert new, reconcile existing ------------------------------
+  for v_item in select * from jsonb_array_elements(coalesce(p_items, '[]'::jsonb))
+  loop
+    v_line := v_item ->> 'external_line_item_id';
+    v_qty := coalesce((v_item ->> 'quantity')::integer, 1);
+    v_seen := v_seen || v_line;
+
+    select * into v_old from public.order_items where order_id = v_order_id and external_line_item_id = v_line;
+
+    -- A line with quantity 0 (e.g. Shopify order edit) is a removal.
+    if v_qty <= 0 then
+      v_seen := array_remove(v_seen, v_line);
+      if v_old.id is not null then v_removed_lines := v_removed_lines || v_line; end if;
+      continue;
+    end if;
+
+    v_product_id := null;
+    if nullif(v_item ->> 'external_listing_id', '') is not null then
+      select pl.product_id into v_product_id
+      from public.product_listings pl
+      where pl.source = v_listing_source
+        and pl.external_listing_id = v_item ->> 'external_listing_id'
+        and (pl.external_variant_id is null or pl.external_variant_id = v_item ->> 'external_variant_id')
+      order by (pl.external_variant_id is not null) desc
+      limit 1;
+    end if;
+    if v_product_id is null and nullif(v_item ->> 'sku', '') is not null then
+      select id into v_product_id from public.products where lower(sku) = lower(v_item ->> 'sku') limit 1;
+    end if;
+
+    insert into public.order_items (
+      order_id, product_id, external_line_item_id, external_listing_id, external_variant_id, sku,
+      title, variant_title, variant_details, quantity, unit_price, total_price, personalisation, marketplace_options
+    ) values (
+      v_order_id, v_product_id, v_line, v_item ->> 'external_listing_id',
+      v_item ->> 'external_variant_id', nullif(v_item ->> 'sku', ''),
+      coalesce(nullif(v_item ->> 'title', ''), 'Untitled item'), nullif(v_item ->> 'variant_title', ''),
+      coalesce(v_item -> 'variant_details', '[]'::jsonb),
+      v_qty,
+      coalesce((v_item ->> 'unit_price')::numeric, 0), coalesce((v_item ->> 'total_price')::numeric, 0),
+      nullif(v_item ->> 'personalisation', ''),
+      v_item -> 'marketplace_options'
+    )
+    on conflict (order_id, external_line_item_id) do update set
+      external_listing_id = excluded.external_listing_id,
+      external_variant_id = excluded.external_variant_id,
+      sku = excluded.sku,
+      title = excluded.title,
+      variant_title = excluded.variant_title,
+      variant_details = excluded.variant_details,
+      quantity = excluded.quantity,
+      unit_price = excluded.unit_price,
+      total_price = excluded.total_price,
+      personalisation = excluded.personalisation,
+      marketplace_options = coalesce(excluded.marketplace_options, public.order_items.marketplace_options),
+      marketplace_status = 'active',
+      removed_at = null,
+      product_id = coalesce(public.order_items.product_id, excluded.product_id);
+
+    continue when v_inserted;  -- first import: nothing to reconcile
+
+    if v_old.id is null then
+      -- Added after the original import.
+      v_changes := v_changes + 1;
+      perform public.raise_order_review(v_order_id,
+        (select id from public.order_items where order_id = v_order_id and external_line_item_id = v_line), null,
+        'item_added', case when v_shipped_state or v_existing.status = 'ready_to_pack' then 'action_required' else 'info' end,
+        'Item added: ' || coalesce(nullif(v_item ->> 'title', ''), 'item'),
+        v_qty || ' × ' || coalesce(nullif(v_item ->> 'title', ''), 'item') || ' was added on ' || v_label ||
+          case when v_shipped_state or v_existing.status = 'ready_to_pack'
+               then ' after the order was ready to pack — a production job has been created; repack before shipping.'
+               else ' — a production job has been created.' end,
+        jsonb_build_object('external_line_item_id', v_line, 'quantity', v_qty),
+        'added:' || v_line, 'marketplace', p_actor_label);
+      continue;
+    end if;
+
+    select * into v_job from public.production_jobs where order_item_id = v_old.id;
+    v_started := v_job.id is not null and public.job_has_physical_work(v_job);
+
+    -- Quantity
+    if v_old.quantity is distinct from v_qty and v_job.id is not null and v_job.cancelled_at is null then
+      v_changes := v_changes + 1;
+      if v_existing.status in ('dispatched', 'completed') then
+        perform public.raise_order_review(v_order_id, v_old.id, v_job.id,
+          case when v_qty > v_old.quantity then 'quantity_increased' else 'quantity_decreased' end, 'action_required',
+          'Quantity changed after dispatch', v_old.title || ': ' || v_old.quantity || ' → ' || v_qty || ' after the order was dispatched.',
+          jsonb_build_object('before', v_old.quantity, 'after', v_qty), 'qty:' || v_line || ':' || v_qty, 'marketplace', p_actor_label);
+      else
+        update public.production_jobs set quantity = v_qty where id = v_job.id;  -- units adjust via trigger
+        select * into v_job from public.production_jobs where id = v_job.id;
+        if v_qty > v_old.quantity then
+          perform public.raise_order_review(v_order_id, v_old.id, v_job.id, 'quantity_increased',
+            case when v_started and v_job.stage in ('quality_check', 'ready_to_pack') or v_shipped_state then 'action_required' else 'info' end,
+            'Quantity increased: ' || v_old.title,
+            v_old.quantity || ' → ' || v_qty || '. ' || (v_qty - v_old.quantity) || ' more unit' ||
+              case when v_qty - v_old.quantity = 1 then ' needs' else 's need' end || ' printing' ||
+              case when v_started and v_job.stage in ('quality_check', 'ready_to_pack') then ' — the job is already at ' || public.stage_label(v_job.stage) || ' and has not been moved back.' else '.' end,
+            jsonb_build_object('before', v_old.quantity, 'after', v_qty), 'qty:' || v_line || ':' || v_qty, 'marketplace', p_actor_label);
+        else
+          perform public.raise_order_review(v_order_id, v_old.id, v_job.id, 'quantity_decreased',
+            case when v_job.quantity_surplus > 0 or (v_job.quantity_printing + v_job.quantity_printed + v_job.quantity_pending) > v_qty then 'action_required' else 'info' end,
+            'Quantity reduced: ' || v_old.title,
+            v_old.quantity || ' → ' || v_qty || '.' ||
+              case when v_job.quantity_surplus > 0 then ' ' || v_job.quantity_surplus || ' printed unit' || case when v_job.quantity_surplus = 1 then ' is' else 's are' end || ' now surplus — nothing was discarded.'
+                   when (v_job.quantity_printing + v_job.quantity_printed + v_job.quantity_pending) > v_qty then ' More units are on the printer than now needed.'
+                   else ' Unprinted units were cancelled.' end,
+            jsonb_build_object('before', v_old.quantity, 'after', v_qty, 'surplus', v_job.quantity_surplus),
+            'qty:' || v_line || ':' || v_qty, 'marketplace', p_actor_label);
+        end if;
+      end if;
+    end if;
+
+    -- Personalisation
+    if coalesce(v_old.personalisation, '') is distinct from coalesce(nullif(v_item ->> 'personalisation', ''), '') then
+      v_changes := v_changes + 1;
+      update public.order_items set personalisation_changed_at = now() where id = v_old.id;
+      perform public.raise_order_review(v_order_id, v_old.id, v_job.id, 'personalisation_changed',
+        case when v_started or v_shipped_state then 'action_required' else 'info' end,
+        'Personalisation changed: ' || v_old.title,
+        case when v_started then 'Changed after production started. Items already printed show the old text — check them before packing.'
+             else 'Updated before production started; the job uses the new text.' end,
+        jsonb_build_object('before', v_old.personalisation, 'after', nullif(v_item ->> 'personalisation', '')),
+        'pers:' || v_line || ':' || md5(coalesce(v_item ->> 'personalisation', '')), 'marketplace', p_actor_label);
+    end if;
+
+    -- Variation / product details
+    if coalesce(v_old.variant_title, '') is distinct from coalesce(nullif(v_item ->> 'variant_title', ''), '')
+       or coalesce(v_old.sku, '') is distinct from coalesce(nullif(v_item ->> 'sku', ''), '')
+       or v_old.title is distinct from coalesce(nullif(v_item ->> 'title', ''), 'Untitled item') then
+      v_changes := v_changes + 1;
+      perform public.raise_order_review(v_order_id, v_old.id, v_job.id, 'variation_changed',
+        case when v_started or v_shipped_state then 'action_required' else 'info' end,
+        'Variation changed: ' || v_old.title,
+        coalesce(v_old.variant_title, '—') || ' → ' || coalesce(nullif(v_item ->> 'variant_title', ''), '—') ||
+          case when v_started then '. Items already printed may not match — check them before packing.' else '.' end,
+        jsonb_build_object('before', jsonb_build_object('title', v_old.title, 'variant', v_old.variant_title, 'sku', v_old.sku),
+                           'after', jsonb_build_object('title', v_item ->> 'title', 'variant', v_item ->> 'variant_title', 'sku', v_item ->> 'sku')),
+        'var:' || v_line || ':' || md5(coalesce(v_item ->> 'title', '') || '|' || coalesce(v_item ->> 'variant_title', '') || '|' || coalesce(v_item ->> 'sku', '')),
+        'marketplace', p_actor_label);
+    end if;
+  end loop;
+
+  -- ---- Removed lines (only when the marketplace sent the complete list) -----
+  if not v_inserted and (v_items_complete or cardinality(v_removed_lines) > 0) then
+    for v_old in
+      select * from public.order_items
+      where order_id = v_order_id and marketplace_status = 'active'
+        and external_line_item_id is not null and not (external_line_item_id = any(v_seen))
+        and (v_items_complete or external_line_item_id = any(v_removed_lines))
+    loop
+      v_changes := v_changes + 1;
+      update public.order_items set marketplace_status = 'removed', removed_at = now() where id = v_old.id;
+      select * into v_job from public.production_jobs where order_item_id = v_old.id;
+      v_started := v_job.id is not null and public.job_has_physical_work(v_job);
+      if v_job.id is not null and not v_started and not v_shipped_state then
+        perform public.close_unstarted_job(v_job.id, 'Item removed on ' || v_label);
+      end if;
+      perform public.raise_order_review(v_order_id, v_old.id, v_job.id, 'item_removed',
+        case when v_started or v_shipped_state then 'action_required' else 'info' end,
+        'Item removed: ' || v_old.title,
+        v_old.quantity || ' × ' || v_old.title || ' was removed on ' || v_label ||
+          case when v_started or v_shipped_state then '. Work has already started — nothing was discarded; decide whether to keep or scrap it.'
+               else '. Its production job was closed.' end,
+        jsonb_build_object('external_line_item_id', v_old.external_line_item_id, 'quantity', v_old.quantity),
+        'removed:' || v_old.external_line_item_id, 'marketplace', p_actor_label);
+    end loop;
+  end if;
+
+  if v_changes > 0 then
+    update public.orders set marketplace_amended_at = now() where id = v_order_id;
+  end if;
+
+  -- ---- Production jobs for new lines (never duplicated: unique order_item_id)
+  if v_cancelled is null and coalesce(v_existing.status, 'new') <> 'cancelled' then
+    insert into public.production_jobs (
+      order_id, order_item_id, product_id, stage, priority, quantity, printer_id,
+      estimated_print_minutes, material, colour, estimated_filament_g, print_requirements, due_date
+    )
+    select
+      v_order_id, oi.id, oi.product_id,
+      case when v_inserted and v_fulfilled then 'completed'::public.production_stage else 'new_order'::public.production_stage end,
+      o.priority, oi.quantity, p.default_printer_id,
+      p.estimated_print_minutes * oi.quantity, p.material, p.default_colour,
+      p.estimated_filament_g * oi.quantity, p.production_instructions, o.dispatch_by
+    from public.order_items oi
+    join public.orders o on o.id = oi.order_id
+    left join public.products p on p.id = oi.product_id
+    left join public.production_jobs j on j.order_item_id = oi.id
+    where oi.order_id = v_order_id and j.id is null and oi.marketplace_status = 'active'
+    on conflict (order_item_id) do nothing;
+  end if;
+
+  -- ---- Marketplace-driven status changes for existing orders ----------------
+  if not v_inserted then
+    if v_cancelled is not null and v_existing.status <> 'cancelled' then
+      perform public.apply_order_cancellation(v_order_id, 'marketplace', null, p_actor_label);
+    elsif v_fulfilled and v_existing.status not in ('cancelled', 'dispatched', 'completed') then
+      -- Shipped outside PrintFlow. Move finished/unstarted jobs forward, but
+      -- never touch a job that is on a printer right now.
+      select jsonb_agg(jsonb_build_object('job_number', j.job_number)) into v_printing
+      from public.production_jobs j
+      where j.order_id = v_order_id and j.cancelled_at is null
+        and exists (select 1 from public.print_runs r where r.production_job_id = j.id and r.status = 'printing');
+      update public.orders set status = 'dispatched', dispatched_at = coalesce(dispatched_at, now()) where id = v_order_id;
+      update public.production_jobs j set stage = 'dispatched'
+      where j.order_id = v_order_id and j.stage not in ('dispatched', 'completed') and j.cancelled_at is null
+        and not exists (select 1 from public.print_runs r where r.production_job_id = j.id and r.status = 'printing');
+      perform public.log_activity('order', v_order_id, v_order_id, 'order.fulfilled_on_marketplace',
+        'Order was marked as shipped on ' || v_label || ' outside PrintFlow', '{}'::jsonb, p_actor_label);
+      if v_printing is not null then
+        perform public.raise_order_review(v_order_id, null, null, 'fulfilled_externally_during_production', 'action_required',
+          'Shipped on ' || v_label || ' while still printing',
+          'The order was marked as shipped on ' || v_label || ' but these jobs are still on a printer: ' ||
+            (select string_agg(x ->> 'job_number', ', ') from jsonb_array_elements(v_printing) x) || '. They were not moved.',
+          jsonb_build_object('jobs', v_printing), 'fulfilled_during_production', 'marketplace', p_actor_label);
+      end if;
+    end if;
+
+    if p_force then
+      v_after := public.marketplace_order_fingerprint(v_order_id);
+      if v_after is not distinct from v_before then
+        return jsonb_build_object('order_id', v_order_id, 'result', 'unchanged');
+      end if;
+      perform public.log_activity('order', v_order_id, v_order_id, 'order.resynced',
+        'Marketplace data refreshed by a full resync from ' || v_label, '{}'::jsonb, p_actor_label);
+    else
+      perform public.log_activity('order', v_order_id, v_order_id, 'order.synced',
+        'Marketplace data updated from ' || v_label, '{}'::jsonb, p_actor_label);
+    end if;
+  else
+    perform public.log_activity('order', v_order_id, v_order_id, 'order.imported',
+      'Order imported from ' || v_label, jsonb_build_object('external_order_id', v_ext_id), p_actor_label);
+  end if;
+
+  return jsonb_build_object('order_id', v_order_id, 'result', case when v_inserted then 'created' else 'updated' end);
+end;
+$$;
+
+revoke execute on function public.ingest_marketplace_order(public.order_source, jsonb, jsonb, text, boolean) from public, anon, authenticated;
+grant execute on function public.ingest_marketplace_order(public.order_source, jsonb, jsonb, text, boolean) to service_role;
+
+
+-- ============================================================
+-- 20261119000004_fulfilment_and_failures.sql
+-- ============================================================
+-- =============================================================================
+-- PrintFlow — Phase 2: reliable fulfilment submissions & failed-order management
+-- Additive only.
+-- =============================================================================
+
+-- ---- Fulfilment submissions (every attempt to send tracking to a marketplace)
+create table public.fulfilment_submissions (
+  id uuid primary key default gen_random_uuid(),
+  shipment_id uuid not null references public.shipments (id) on delete cascade,
+  order_id uuid not null references public.orders (id) on delete cascade,
+  provider public.integration_provider not null,
+  attempt integer not null check (attempt >= 1),
+  status text not null default 'in_progress'
+    check (status in ('in_progress', 'succeeded', 'already_fulfilled', 'failed')),
+  error_category text
+    check (error_category in ('validation', 'credentials', 'rate_limited', 'marketplace_rejected', 'marketplace_error', 'network', 'unknown')),
+  retryable boolean,
+  http_status integer,
+  request jsonb,            -- what was sent (no secrets)
+  response jsonb,           -- what came back (trimmed)
+  error_message text,
+  external_fulfilment_id text,
+  submitted_by uuid references public.profiles (id) on delete set null,
+  started_at timestamptz not null default now(),
+  finished_at timestamptz,
+  created_at timestamptz not null default now()
+);
+create index fulfilment_submissions_shipment_idx on public.fulfilment_submissions (shipment_id, started_at desc);
+-- Only one submission per shipment may be in flight → no concurrent duplicates.
+create unique index fulfilment_submissions_one_in_flight on public.fulfilment_submissions (shipment_id) where status = 'in_progress';
+
+alter table public.fulfilment_submissions enable row level security;
+create policy fulfilment_submissions_select on public.fulfilment_submissions for select to authenticated using (public.is_team_member());
+
+alter table public.shipments
+  add column marketplace_push_attempts integer not null default 0,
+  add column marketplace_push_error_category text,
+  add column marketplace_push_last_attempt_at timestamptz;
+
+-- Claim the right to submit (service role). Refuses if already sent or in flight.
+-- A submission stuck in_progress for over 10 minutes (crashed run) is closed as
+-- an unknown outcome; the next attempt checks the marketplace first.
+create or replace function public.begin_fulfilment_submission(
+  p_shipment_id uuid,
+  p_provider public.integration_provider,
+  p_request jsonb,
+  p_user uuid
+)
+returns jsonb
+language plpgsql
+as $$
+declare
+  v_shipment record;
+  v_id uuid;
+  v_attempt integer;
+begin
+  select s.*, o.id as o_id into v_shipment
+  from public.shipments s join public.orders o on o.id = s.order_id
+  where s.id = p_shipment_id for update of s;
+  if v_shipment.id is null then raise exception 'Shipment not found'; end if;
+  if v_shipment.marketplace_push_status = 'sent' then
+    raise exception 'Tracking has already been sent to the marketplace for this shipment';
+  end if;
+
+  update public.fulfilment_submissions
+  set status = 'failed', error_category = 'unknown', retryable = true, finished_at = now(),
+      error_message = 'Submission did not finish (interrupted). The marketplace is checked before retrying.'
+  where shipment_id = p_shipment_id and status = 'in_progress' and started_at < now() - interval '10 minutes';
+
+  select coalesce(max(attempt), 0) + 1 into v_attempt from public.fulfilment_submissions where shipment_id = p_shipment_id;
+  begin
+    insert into public.fulfilment_submissions (shipment_id, order_id, provider, attempt, request, submitted_by)
+    values (p_shipment_id, v_shipment.o_id, p_provider, v_attempt, p_request, p_user)
+    returning id into v_id;
+  exception when unique_violation then
+    raise exception 'A submission for this shipment is already in progress';
+  end;
+  update public.shipments set marketplace_push_attempts = v_attempt, marketplace_push_last_attempt_at = now()
+  where id = p_shipment_id;
+  return jsonb_build_object('submission_id', v_id, 'attempt', v_attempt);
+end;
+$$;
+
+create or replace function public.finish_fulfilment_submission(
+  p_submission_id uuid,
+  p_status text,
+  p_error_category text default null,
+  p_retryable boolean default null,
+  p_http_status integer default null,
+  p_response jsonb default null,
+  p_error_message text default null,
+  p_external_id text default null
+)
+returns void
+language plpgsql
+as $$
+declare
+  v_sub record;
+  v_label text;
+begin
+  update public.fulfilment_submissions set
+    status = p_status, error_category = p_error_category, retryable = p_retryable, http_status = p_http_status,
+    response = p_response, error_message = left(p_error_message, 2000), external_fulfilment_id = p_external_id,
+    finished_at = now()
+  where id = p_submission_id and status = 'in_progress'
+  returning * into v_sub;
+  if v_sub.id is null then raise exception 'Submission not found or already finished'; end if;
+  v_label := initcap(v_sub.provider::text);
+
+  if p_status in ('succeeded', 'already_fulfilled') then
+    update public.shipments set
+      marketplace_push_status = 'sent', marketplace_pushed_at = now(), marketplace_push_error = null,
+      marketplace_push_error_category = null,
+      external_fulfilment_id = coalesce(p_external_id, external_fulfilment_id)
+    where id = v_sub.shipment_id;
+    perform public.log_activity('order', v_sub.order_id, v_sub.order_id, 'fulfilment.pushed',
+      case when p_status = 'already_fulfilled'
+        then 'Tracking was already on ' || v_label || ' — recorded as sent without submitting again'
+        else 'Tracking sent to ' || v_label end,
+      jsonb_build_object('submission_id', v_sub.id, 'attempt', v_sub.attempt), 'Marketplace update');
+  else
+    update public.shipments set
+      marketplace_push_status = 'failed', marketplace_push_error = left(p_error_message, 2000),
+      marketplace_push_error_category = p_error_category
+    where id = v_sub.shipment_id;
+    perform public.log_activity('order', v_sub.order_id, v_sub.order_id, 'fulfilment.failed',
+      'Sending tracking to ' || v_label || ' failed (attempt ' || v_sub.attempt || '): ' || coalesce(p_error_message, 'unknown error'),
+      jsonb_build_object('submission_id', v_sub.id, 'category', p_error_category, 'retryable', p_retryable), 'Marketplace update');
+  end if;
+end;
+$$;
+
+revoke execute on function public.begin_fulfilment_submission(uuid, public.integration_provider, jsonb, uuid) from public, anon, authenticated;
+revoke execute on function public.finish_fulfilment_submission(uuid, text, text, boolean, integer, jsonb, text, text) from public, anon, authenticated;
+grant execute on function public.begin_fulfilment_submission(uuid, public.integration_provider, jsonb, uuid) to service_role;
+grant execute on function public.finish_fulfilment_submission(uuid, text, text, boolean, integer, jsonb, text, text) to service_role;
+
+-- ---- Failed order management ---------------------------------------------------
+alter table public.sync_failures
+  add column dismissed_at timestamptz,
+  add column dismissed_by uuid references public.profiles (id) on delete set null,
+  add column dismiss_reason text,
+  add column reopened_at timestamptz,
+  add column reopened_by uuid references public.profiles (id) on delete set null;
+
+-- Full history of every failure, retry, dismissal and reopening.
+create table public.sync_failure_events (
+  id uuid primary key default gen_random_uuid(),
+  failure_id uuid not null references public.sync_failures (id) on delete cascade,
+  event text not null check (event in ('failed', 'failed_while_dismissed', 'retried', 'resolved', 'dismissed', 'reopened')),
+  error text,
+  note text,
+  actor_id uuid references public.profiles (id) on delete set null,
+  actor_label text,
+  sync_log_id uuid references public.sync_logs (id) on delete set null,
+  created_at timestamptz not null default now()
+);
+create index sync_failure_events_failure_idx on public.sync_failure_events (failure_id, created_at desc);
+alter table public.sync_failure_events enable row level security;
+create policy sync_failure_events_select on public.sync_failure_events for select to authenticated using (public.is_team_member());
+
+-- Backfill an initial event for existing failures so their history starts somewhere.
+insert into public.sync_failure_events (failure_id, event, error, created_at, actor_label)
+select id, 'failed', last_error, first_failed_at, 'Sync' from public.sync_failures
+where not exists (select 1 from public.sync_failure_events e where e.failure_id = sync_failures.id);
+
+drop function if exists public.record_sync_failure(public.integration_provider, text, timestamptz, jsonb, text, uuid);
+
+-- Record a failure. A dismissed failure stays dismissed (it never silently
+-- reappears) but the new error is still kept in its history.
+create or replace function public.record_sync_failure(
+  p_provider public.integration_provider,
+  p_external_order_id text,
+  p_marketplace_updated_at timestamptz,
+  p_payload jsonb,
+  p_error text,
+  p_sync_log_id uuid,
+  p_actor_id uuid default null,
+  p_actor_label text default 'Sync'
+)
+returns jsonb
+language plpgsql
+as $$
+declare
+  v_row record;
+begin
+  insert into public.sync_failures (
+    integration_id, provider, external_order_id, marketplace_updated_at, payload, last_error, last_sync_log_id
+  ) values (
+    (select id from public.integrations where provider = p_provider),
+    p_provider, p_external_order_id, p_marketplace_updated_at, p_payload, left(p_error, 2000), p_sync_log_id
+  )
+  on conflict (provider, external_order_id) do update set
+    attempts = case when public.sync_failures.resolved_at is null then public.sync_failures.attempts + 1 else 1 end,
+    first_failed_at = case when public.sync_failures.resolved_at is null then public.sync_failures.first_failed_at else now() end,
+    marketplace_updated_at = greatest(public.sync_failures.marketplace_updated_at, excluded.marketplace_updated_at),
+    payload = case
+      when public.sync_failures.marketplace_updated_at is null
+        or excluded.marketplace_updated_at >= public.sync_failures.marketplace_updated_at then excluded.payload
+      else public.sync_failures.payload end,
+    last_error = excluded.last_error,
+    last_failed_at = now(),
+    last_sync_log_id = excluded.last_sync_log_id,
+    -- A previously resolved order failing again is a new problem: reopen it.
+    -- A dismissed one stays dismissed.
+    resolved_at = null,
+    resolved_sync_log_id = null,
+    dismissed_at = case when public.sync_failures.resolved_at is not null then null else public.sync_failures.dismissed_at end
+  returning id, attempts, dismissed_at into v_row;
+
+  insert into public.sync_failure_events (failure_id, event, error, actor_id, actor_label, sync_log_id)
+  values (v_row.id, case when v_row.dismissed_at is null then 'failed' else 'failed_while_dismissed' end,
+          left(p_error, 2000), p_actor_id, p_actor_label, p_sync_log_id);
+
+  return jsonb_build_object('attempts', v_row.attempts, 'dismissed', v_row.dismissed_at is not null, 'failure_id', v_row.id);
+end;
+$$;
+
+drop function if exists public.resolve_sync_failure(public.integration_provider, text, uuid);
+
+create or replace function public.resolve_sync_failure(
+  p_provider public.integration_provider,
+  p_external_order_id text,
+  p_sync_log_id uuid,
+  p_actor_id uuid default null,
+  p_actor_label text default 'Sync'
+)
+returns boolean
+language plpgsql
+as $$
+declare
+  v_id uuid;
+begin
+  update public.sync_failures
+  set resolved_at = now(), resolved_sync_log_id = p_sync_log_id
+  where provider = p_provider and external_order_id = p_external_order_id and resolved_at is null
+  returning id into v_id;
+  if v_id is null then return false; end if;
+  insert into public.sync_failure_events (failure_id, event, actor_id, actor_label, sync_log_id)
+  values (v_id, 'resolved', p_actor_id, p_actor_label, p_sync_log_id);
+  return true;
+end;
+$$;
+
+revoke execute on function public.record_sync_failure(public.integration_provider, text, timestamptz, jsonb, text, uuid, uuid, text) from public, anon, authenticated;
+revoke execute on function public.resolve_sync_failure(public.integration_provider, text, uuid, uuid, text) from public, anon, authenticated;
+grant execute on function public.record_sync_failure(public.integration_provider, text, timestamptz, jsonb, text, uuid, uuid, text) to service_role;
+grant execute on function public.resolve_sync_failure(public.integration_provider, text, uuid, uuid, text) to service_role;
+
+-- Admin actions (security definer with explicit admin check: sync_failures has
+-- no write policies for normal users).
+create or replace function public.dismiss_sync_failure(p_failure_id uuid, p_reason text)
+returns void
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  if not public.is_admin() then raise exception 'Only owners and admins can dismiss failed orders' using errcode = '42501'; end if;
+  if coalesce(trim(p_reason), '') = '' then raise exception 'Give a reason for dismissing this failure'; end if;
+  update public.sync_failures
+  set dismissed_at = now(), dismissed_by = (select auth.uid()), dismiss_reason = trim(p_reason)
+  where id = p_failure_id and resolved_at is null and dismissed_at is null;
+  if not found then raise exception 'Only open failures can be dismissed'; end if;
+  insert into public.sync_failure_events (failure_id, event, note, actor_id)
+  values (p_failure_id, 'dismissed', trim(p_reason), (select auth.uid()));
+end;
+$$;
+
+create or replace function public.reopen_sync_failure(p_failure_id uuid, p_note text default null)
+returns void
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  if not public.is_admin() then raise exception 'Only owners and admins can reopen failed orders' using errcode = '42501'; end if;
+  update public.sync_failures
+  set dismissed_at = null, reopened_at = now(), reopened_by = (select auth.uid())
+  where id = p_failure_id and dismissed_at is not null and resolved_at is null;
+  if not found then raise exception 'Only dismissed failures can be reopened'; end if;
+  insert into public.sync_failure_events (failure_id, event, note, actor_id)
+  values (p_failure_id, 'reopened', nullif(trim(coalesce(p_note, '')), ''), (select auth.uid()));
+end;
+$$;
+
+revoke execute on function public.dismiss_sync_failure(uuid, text) from public, anon;
+revoke execute on function public.reopen_sync_failure(uuid, text) from public, anon;
+grant execute on function public.dismiss_sync_failure(uuid, text) to authenticated, service_role;
+grant execute on function public.reopen_sync_failure(uuid, text) to authenticated, service_role;
+
+
+-- Record the applied migrations for the Supabase CLI.
+create schema if not exists supabase_migrations;
+create table if not exists supabase_migrations.schema_migrations (version text primary key, statements text[], name text);
+insert into supabase_migrations.schema_migrations (version, name) values ('20261118000001', 'core_schema') on conflict (version) do nothing;
+insert into supabase_migrations.schema_migrations (version, name) values ('20261118000002', 'functions_and_triggers') on conflict (version) do nothing;
+insert into supabase_migrations.schema_migrations (version, name) values ('20261118000003', 'row_level_security') on conflict (version) do nothing;
+insert into supabase_migrations.schema_migrations (version, name) values ('20261118000004', 'storage') on conflict (version) do nothing;
+insert into supabase_migrations.schema_migrations (version, name) values ('20261118000005', 'analytics') on conflict (version) do nothing;
+insert into supabase_migrations.schema_migrations (version, name) values ('20261118000006', 'customer_merge') on conflict (version) do nothing;
+insert into supabase_migrations.schema_migrations (version, name) values ('20261119000001', 'sync_reliability') on conflict (version) do nothing;
+insert into supabase_migrations.schema_migrations (version, name) values ('20261119000002', 'production_units') on conflict (version) do nothing;
+insert into supabase_migrations.schema_migrations (version, name) values ('20261119000003', 'order_reconciliation') on conflict (version) do nothing;
+insert into supabase_migrations.schema_migrations (version, name) values ('20261119000004', 'fulfilment_and_failures') on conflict (version) do nothing;
+
+commit;
+
+select 'PrintFlow database ready' as result, (select count(*) from public.printers) as printers;

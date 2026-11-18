@@ -109,6 +109,10 @@ The migrations live in `supabase/migrations/`:
 
 **Hosted Supabase:**
 
+*No command line:* for a **new, empty** project, open Supabase → SQL Editor → New query, paste the whole of `supabase/setup/printflow_full_setup.sql` and click **Run** (once). It applies all migrations in one transaction (all or nothing) and records them, so `supabase db push` works for later migrations. Regenerate it if migrations change.
+
+*With the CLI:*
+
 ```bash
 npx supabase login
 npx supabase link --project-ref YOUR_PROJECT_REF
