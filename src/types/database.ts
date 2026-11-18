@@ -624,6 +624,9 @@ isOneToOne: false
 "mark_order_packed":
 { Args: { "p_checklist": Json,"p_order_id": string,"p_packaging_notes"?: string }; Returns: string
                            },
+"merge_customers":
+{ Args: { "p_source": string,"p_target": string }; Returns: undefined
+                           },
 "purge_sample_data":
 { Args: Record<PropertyKey, never>; Returns: Json
                            },

@@ -64,11 +64,10 @@ export function ManualOrderForm({
 
   const onProductChange = (index: number, productId: string) => {
     const p = products.find((x) => x.id === productId);
-    form.setValue(`items.${index}.product_id`, productId);
     if (p) {
-      if (!form.getValues(`items.${index}.title`)) form.setValue(`items.${index}.title`, p.name);
+      if (!form.getValues(`items.${index}.title`)) form.setValue(`items.${index}.title`, p.name, { shouldDirty: true });
       if (p.base_price != null && !form.getValues(`items.${index}.unit_price`)) {
-        form.setValue(`items.${index}.unit_price`, String(p.base_price));
+        form.setValue(`items.${index}.unit_price`, String(p.base_price), { shouldDirty: true, shouldValidate: true });
       }
     }
   };
@@ -111,8 +110,7 @@ export function ManualOrderForm({
                     <Field label="Product" htmlFor={`items.${index}.product_id`}>
                       <Select
                         id={`items.${index}.product_id`}
-                        value={items?.[index]?.product_id ?? ""}
-                        onChange={(e) => onProductChange(index, e.target.value)}
+                        {...form.register(`items.${index}.product_id`, { onChange: (e) => onProductChange(index, e.target.value) })}
                       >
                         <option value="">Custom item (not in catalogue)</option>
                         {products.map((p) => (

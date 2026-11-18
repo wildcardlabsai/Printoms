@@ -126,7 +126,12 @@ export function ProductionBoard({
   const [priorityFilter, setPriorityFilter] = React.useState("");
   const [mobileStage, setMobileStage] = React.useState<ProductionStage>("new_order");
 
-  React.useEffect(() => setJobs(initialJobs), [initialJobs]);
+  // Re-sync local (optimistic) state when the server sends fresh data.
+  const [prevInitial, setPrevInitial] = React.useState(initialJobs);
+  if (initialJobs !== prevInitial) {
+    setPrevInitial(initialJobs);
+    setJobs(initialJobs);
+  }
 
   const sensors = useSensors(
     useSensor(MouseSensor, { activationConstraint: { distance: 6 } }),
@@ -215,7 +220,7 @@ export function ProductionBoard({
         <>
           {/* Desktop/tablet: kanban with drag and drop */}
           <div className="hidden md:block">
-            <DndContext sensors={sensors} onDragStart={onDragStart} onDragEnd={onDragEnd} onDragCancel={() => setActiveId(null)}>
+            <DndContext id="production-board" sensors={sensors} onDragStart={onDragStart} onDragEnd={onDragEnd} onDragCancel={() => setActiveId(null)}>
               <div className="scrollbar-thin -mx-4 overflow-x-auto px-4 pb-3 sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8">
                 <div className="flex min-w-max gap-3">
                   {PRODUCTION_STAGES.map((stage) => (

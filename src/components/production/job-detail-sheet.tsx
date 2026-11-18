@@ -124,34 +124,40 @@ export function JobDetailSheet({
   printers: PrinterOption[];
   canWrite: boolean;
 }) {
+  return (
+    <Dialog open={jobId !== null} onOpenChange={(o) => !o && onClose()}>
+      {jobId ? <JobDetailContent key={jobId} jobId={jobId} printers={printers} canWrite={canWrite} /> : null}
+    </Dialog>
+  );
+}
+
+function JobDetailContent({ jobId, printers, canWrite }: { jobId: string; printers: PrinterOption[]; canWrite: boolean }) {
   const router = useRouter();
   const toast = useToast();
   const [detail, setDetail] = React.useState<JobDetail | null>(null);
-  const [loading, setLoading] = React.useState(false);
   const [loadError, setLoadError] = React.useState<string | null>(null);
   const [printerId, setPrinterId] = React.useState("");
   const [finishing, setFinishing] = React.useState<"success" | "failure" | null>(null);
   const [pending, startTransition] = React.useTransition();
-
-  const load = React.useCallback(async (id: string) => {
-    setLoading(true);
-    setLoadError(null);
-    const res = await getJobDetailAction(id);
-    if (res.ok && res.data) {
-      setDetail(res.data);
-      setPrinterId(res.data.job.printer_id ?? "");
-    } else if (!res.ok) setLoadError(res.error);
-    setLoading(false);
-  }, []);
+  const [version, setVersion] = React.useState(0);
 
   React.useEffect(() => {
-    setFinishing(null);
-    if (jobId) void load(jobId);
-    else setDetail(null);
-  }, [jobId, load]);
+    let cancelled = false;
+    getJobDetailAction(jobId).then((res) => {
+      if (cancelled) return;
+      if (res.ok && res.data) {
+        setDetail(res.data);
+        setPrinterId((current) => current || res.data!.job.printer_id || "");
+      } else if (!res.ok) setLoadError(res.error);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [jobId, version]);
 
+  const loading = !detail && !loadError;
   const refresh = () => {
-    if (jobId) void load(jobId);
+    setVersion((v) => v + 1);
     router.refresh();
   };
 
@@ -170,7 +176,6 @@ export function JobDetailSheet({
   const variants = Array.isArray(job?.item?.variant_details) ? (job!.item!.variant_details as { name?: string; value?: string }[]) : [];
 
   return (
-    <Dialog open={jobId !== null} onOpenChange={(o) => !o && onClose()}>
       <DialogContent
         size="xl"
         title={job ? `${job.job_number} · ${job.product?.name ?? job.item?.title ?? "Job"}` : "Production job"}
@@ -375,6 +380,5 @@ export function JobDetailSheet({
           </div>
         ) : null}
       </DialogContent>
-    </Dialog>
   );
 }

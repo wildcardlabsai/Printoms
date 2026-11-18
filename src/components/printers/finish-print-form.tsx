@@ -33,8 +33,8 @@ export function FinishPrintForm({
   const [notes, setNotes] = React.useState("");
   const [requeue, setRequeue] = React.useState(true);
   const preferred = filament.find((f) => preferredMaterial && f.material === preferredMaterial);
-  const [stockId, setStockId] = React.useState(preferred?.id ?? "");
-  const [grams, setGrams] = React.useState(outcome === "success" && estimatedGrams ? String(Math.round(Number(estimatedGrams))) : "");
+  const [stockId, setStockId] = React.useState(defaultOutcome === "success" ? (preferred?.id ?? "") : "");
+  const [grams, setGrams] = React.useState(defaultOutcome === "success" && estimatedGrams ? String(Math.round(Number(estimatedGrams))) : "");
   const [error, setError] = React.useState<string | null>(null);
   const [pending, startTransition] = React.useTransition();
 
@@ -71,8 +71,13 @@ export function FinishPrintForm({
             type="button"
             onClick={() => {
               setOutcome(value);
-              if (value === "failure") setGrams("");
-              else if (estimatedGrams) setGrams(String(Math.round(Number(estimatedGrams))));
+              if (value === "failure") {
+                setGrams("");
+                setStockId("");
+              } else {
+                if (estimatedGrams) setGrams(String(Math.round(Number(estimatedGrams))));
+                if (!stockId && preferred) setStockId(preferred.id);
+              }
             }}
             className={cn(
               "flex items-center justify-center gap-2 rounded-xl border-2 px-3 py-3 text-sm font-semibold transition",
