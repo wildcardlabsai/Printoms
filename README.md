@@ -84,6 +84,7 @@ See `.env.example` for the full list.
 | `SHOPIFY_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET` | **server only** | OAuth installation (Dev Dashboard app) |
 | `SHOPIFY_ADMIN_ACCESS_TOKEN` | **server only** | Alternative: an existing Admin API token |
 | `SHOPIFY_API_VERSION` | server | Defaults to `2025-10` |
+| `SHOPIFY_REQUEST_ALL_ORDERS` | server | `true` to also request `read_all_orders` (order history older than 60 days). Off by default. |
 
 No marketplace secret uses the `NEXT_PUBLIC_` prefix. All server modules that read secrets import `server-only`, so the build fails if one is accidentally imported into browser code.
 
@@ -101,6 +102,7 @@ The migrations live in `supabase/migrations/`:
 | `…04_storage.sql` | Private `product-images` and `model-files` buckets, with policies |
 | `…05_analytics.sql` | `dashboard_metrics`, `analytics_report`, and the customer/filament summary views |
 | `…06_customer_merge.sql` | Explicit, atomic customer merge |
+| `…20261119000001_sync_reliability.sql` | Phase 1: `sync_failures` retry queue, sync-log retry/recovery counters and warnings, `orders.customer_data_status`, `order_items.marketplace_options`, the `resync` trigger and the updated `ingest_marketplace_order` (force mode, restricted-customer handling). Additive only. |
 
 **Hosted Supabase:**
 
@@ -129,9 +131,10 @@ Access tokens last one hour and are refreshed automatically. Etsy rotates refres
 
 1. In the Shopify **Dev Dashboard**, create an app for your store and set `SHOPIFY_STORE_DOMAIN`.
 2. Give it these scopes: `read_orders, read_customers, read_products, read_fulfillments, write_fulfillments, read_merchant_managed_fulfillment_orders, write_merchant_managed_fulfillment_orders`.
-3. Request **protected customer data** access (name, email, address). Without it, Shopify withholds customer details.
+3. Request **protected customer data** access (name, email, address). Without it, Shopify withholds customer details. PrintFlow still imports the orders and line items, marks the withheld fields as *restricted* (shown on the order and packing screens), and fills them in automatically on the next sync once access is approved.
 4. Add the redirect URL `https://YOUR-DOMAIN/api/integrations/shopify/callback`, and copy the client ID and secret into `SHOPIFY_CLIENT_ID` and `SHOPIFY_CLIENT_SECRET`.
-5. Redeploy and click **Connect Shopify** to install the app. (If you have a legacy custom-app Admin API token, set `SHOPIFY_ADMIN_ACCESS_TOKEN` instead.)
+5. **Order history:** without the `read_all_orders` scope, Shopify only returns the last **60 days** of orders, and PrintFlow limits its import options to match. To import older orders, add `read_all_orders` to the app's scopes, set `SHOPIFY_REQUEST_ALL_ORDERS=true`, and reconnect. PrintFlow reads the scopes actually granted and only offers windows they support.
+6. Redeploy and click **Connect Shopify** to install the app. (If you have a legacy custom-app Admin API token, set `SHOPIFY_ADMIN_ACCESS_TOKEN` instead.)
 
 ## Scheduled sync (every 10 minutes)
 
@@ -151,6 +154,9 @@ Access tokens last one hour and are refreshed automatically. Etsy rotates refres
 - **Retries:** network errors, 429s and 5xx responses are retried with exponential backoff and jitter, honouring `Retry-After`.
 - **Idempotent ingest:** every order goes through `ingest_marketplace_order`. It upserts on **(marketplace, external order ID)**, overwrites only marketplace-owned columns, and never touches internal notes, priority, deadlines or production stages. Line items upsert on their marketplace line ID.
 - **Historical orders:** orders already shipped on the marketplace when first imported arrive as *completed*, so a backfill doesn't flood the production board. Orders cancelled on the marketplace are marked *cancelled*.
+- **Failed-order recovery:** an order that fails to import is recorded in `sync_failures` with its payload and error, and shown on the Integrations page. The cursor is held at that order for up to 3 attempts so it's fetched again from the marketplace. After that it is retried from the stored payload on every run, and it is cleared the moment it imports. Stale retries can never overwrite newer marketplace data.
+- **Personalisation:** Etsy variations and Shopify line-item properties are classified by label. Labels such as *Personalisation*, *Custom text*, *Name to engrave*, *Enter your name* and *Gift message* become personalisation; *Size*, *Colour*, *Material* and so on stay variations. The untouched original data is kept in `order_items.marketplace_options`.
+- **Full resync (admins):** **Settings → Integrations → Full resync** re-applies marketplace data to every order in a chosen window, even when the marketplace timestamp hasn't changed. It never duplicates orders or jobs and never changes notes, priorities, deadlines, printer assignments, stages, print history or shipments. It is logged, requires confirmation, and can be resumed if it pauses.
 - **Fault isolation:** one bad order is logged without failing the run. After repeated failures the schedule backs off (10 → 20 → 40 minutes, up to 6 hours).
 - **Time budget:** a run stops pulling new pages after 4 minutes, and the next run continues from the cursor.
 
@@ -193,7 +199,7 @@ src/
       sync.ts                  Sync engine     fulfilment.ts  Tracking push-back
       crypto.ts                AES-256-GCM     http.ts        Retry/backoff
 supabase/migrations/           Schema, functions, RLS, storage, analytics
-scripts/test-sync-engine.ts    Sync engine integration test (mocked marketplace APIs)
+tests/unit, tests/integration  node:test suites (fake marketplace APIs, local Supabase only)
 ```
 
 **Adding a marketplace:** implement `MarketplaceAdapter` (`fetchOrders` and `pushFulfilment`), map its orders to `NormalisedOrder`, register it in `integrations/registry.ts`, and add the value to the `integration_provider` and `order_source` enums.
@@ -246,7 +252,9 @@ Every sample record is clearly marked:
 npm run typecheck     # tsc --noEmit
 npm run lint          # eslint (Next core-web-vitals + TypeScript)
 npm run build         # production build
-npm run test:sync     # sync engine against mocked Etsy/Shopify APIs (needs local Supabase + .env.local)
+npm run test:unit         # pure logic: personalisation, Shopify permission errors, import windows, cursor, resync validation
+npm run test:integration  # sync engine against fake Etsy/Shopify APIs on a LOCAL Supabase stack (refuses remote databases)
+npm test                  # both
 ```
 
 These were verified during development against a local Supabase stack:

@@ -1,5 +1,6 @@
 import type { NormalisedOrder } from "../types";
 import { addBusinessDays } from "@/lib/utils";
+import { splitOptions } from "../personalisation";
 
 type Money = { shopMoney: { amount: string; currencyCode?: string } } | null;
 export type ShopifyOrderNode = {
@@ -8,13 +9,13 @@ export type ShopifyOrderNode = {
   createdAt: string;
   updatedAt: string;
   cancelledAt: string | null;
-  email: string | null;
+  email?: string | null;
   note: string | null;
   displayFinancialStatus: string | null;
   displayFulfillmentStatus: string | null;
   currencyCode: string;
-  customer: { id: string; displayName: string | null; email: string | null } | null;
-  shippingAddress: {
+  customer?: { id: string; displayName: string | null; email: string | null } | null;
+  shippingAddress?: {
     name: string | null;
     address1: string | null;
     address2: string | null;
@@ -69,18 +70,27 @@ function paymentStatus(s: string | null): NormalisedOrder["order"]["payment_stat
   }
 }
 
-const PERSONALISATION = /personali[sz]|engrav|custom text|name/i;
+export const RESTRICTED_CUSTOMER_NAME = "Shopify customer (details restricted)";
 
-export function mapShopifyOrder(o: ShopifyOrderNode, defaultDispatchDays: number): NormalisedOrder {
-  const a = o.shippingAddress;
-  const customerName = a?.name?.trim() || o.customer?.displayName?.trim() || "Shopify customer";
+/**
+ * @param restrictedFields protected fields Shopify withheld for this order
+ *   (e.g. ["customer","email","shipping_address"]). Withheld fields are stored
+ *   as unavailable rather than as genuinely empty values.
+ */
+export function mapShopifyOrder(o: ShopifyOrderNode, defaultDispatchDays: number, restrictedFields: string[] = []): NormalisedOrder {
+  const restricted = new Set(restrictedFields);
+  const a = restricted.has("shipping_address") ? null : o.shippingAddress;
+  const customer = restricted.has("customer") ? null : o.customer;
+  const email = restricted.has("email") ? null : o.email;
+  const customerName =
+    a?.name?.trim() || customer?.displayName?.trim() || (restricted.size ? RESTRICTED_CUSTOMER_NAME : "Shopify customer");
   return {
     order: {
       external_order_id: o.id,
       external_order_number: o.name,
-      customer: { external_id: o.customer?.id ?? null },
+      customer: { external_id: customer?.id ?? null },
       customer_name: customerName,
-      customer_email: o.email || o.customer?.email || null,
+      customer_email: email || customer?.email || null,
       shipping_address: {
         name: a?.name ?? null,
         line1: a?.address1 ?? null,
@@ -108,11 +118,13 @@ export function mapShopifyOrder(o: ShopifyOrderNode, defaultDispatchDays: number
       marketplace_updated_at: o.updatedAt,
       marketplace_cancelled_at: o.cancelledAt,
       is_fulfilled: o.displayFulfillmentStatus === "FULFILLED",
+      customer_data_status: restricted.size ? "restricted" : "available",
+      customer_data_restricted_fields: [...restricted].sort(),
     },
     items: o.lineItems.nodes.map((li) => {
+      // Keys starting with "_" are hidden app data by Shopify convention.
       const attrs = li.customAttributes.filter((c) => c.value && !c.key.startsWith("_"));
-      const personal = attrs.filter((c) => PERSONALISATION.test(c.key));
-      const rest = attrs.filter((c) => !PERSONALISATION.test(c.key));
+      const { personalisation, variations: rest } = splitOptions(attrs.map((c) => ({ name: c.key, value: c.value ?? "" })));
       const unit = amount(li.originalUnitPriceSet);
       return {
         external_line_item_id: li.id,
@@ -121,11 +133,13 @@ export function mapShopifyOrder(o: ShopifyOrderNode, defaultDispatchDays: number
         sku: li.sku || null,
         title: li.title,
         variant_title: li.variantTitle && li.variantTitle !== "Default Title" ? li.variantTitle : null,
-        variant_details: rest.map((c) => ({ name: c.key, value: c.value ?? "" })),
+        variant_details: rest,
         quantity: li.quantity,
         unit_price: unit,
         total_price: amount(li.discountedTotalSet) || unit * li.quantity,
-        personalisation: personal.map((c) => (personal.length > 1 ? `${c.key}: ${c.value}` : c.value)).join("\n") || null,
+        personalisation,
+        // Original data, untouched.
+        marketplace_options: { variant_title: li.variantTitle, custom_attributes: li.customAttributes },
       };
     }),
   };

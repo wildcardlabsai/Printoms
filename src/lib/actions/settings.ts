@@ -11,6 +11,7 @@ import { uuid } from "@/lib/validation/common";
 import { deleteCredentials, getIntegration } from "@/lib/integrations/credentials";
 import { pushShipmentToMarketplace } from "@/lib/integrations/fulfilment";
 import { hasServiceRole } from "@/lib/server-env";
+import { maxImportDays } from "@/lib/integrations/import-window";
 
 function handle(e: unknown): ActionResult<never> {
   if (e instanceof AuthorisationError) return fail(e.message);
@@ -50,6 +51,15 @@ export async function updateIntegrationSettingsAction(
     const p = provider.parse(providerInput);
     const v = integrationSettingsSchema.parse(input);
     const supabase = await createClient();
+    const { data: current } = await supabase.from("integrations").select("scopes").eq("provider", p).single();
+    const max = maxImportDays(p, current?.scopes);
+    if (v.initial_import_days > max) {
+      return fail(
+        p === "shopify"
+          ? `Shopify only provides the last ${max} days of orders without the read_all_orders permission.`
+          : `The maximum import window is ${max} days.`,
+      );
+    }
     const { error } = await supabase.from("integrations").update(v).eq("provider", p);
     if (error) return fail(dbErrorMessage(error));
     revalidatePath("/settings/integrations");

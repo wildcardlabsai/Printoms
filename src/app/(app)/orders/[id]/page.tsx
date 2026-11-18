@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { ArrowLeft, CalendarClock, ExternalLink, History, Mail, MapPin, MessageSquareQuote, Package, Phone, Truck } from "lucide-react";
+import { ArrowLeft, CalendarClock, ShieldAlert, ExternalLink, History, Mail, MapPin, MessageSquareQuote, Package, Phone, Truck } from "lucide-react";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { SampleBadge } from "@/components/ui/badge";
 import { DescriptionList, Notice } from "@/components/ui/misc";
@@ -15,6 +15,20 @@ import { OrderItemCard } from "@/components/orders/order-item-card";
 import { getIntegrationShopDomain, getNotes, getOrder, getOrderActivity, getProductOptions } from "@/lib/data/orders";
 import { hasRole, requireUser } from "@/lib/auth";
 import { addressLines, externalRef, formatCurrency, formatDate, formatDateTime, formatRelative, isOverdue } from "@/lib/utils";
+
+const FIELD_LABELS: Record<string, string> = {
+  customer: "the customer record",
+  email: "the email address",
+  shipping_address: "the delivery address",
+  phone: "the phone number",
+  billing_address: "the billing address",
+};
+
+function formatRestricted(fields: string[]) {
+  const labels = fields.map((f) => FIELD_LABELS[f] ?? f);
+  if (!labels.length) return "customer details";
+  return labels.length === 1 ? labels[0]! : `${labels.slice(0, -1).join(", ")} and ${labels.at(-1)}`;
+}
 
 export async function generateMetadata({ params }: { params: Promise<{ id: string }> }): Promise<Metadata> {
   const { id } = await params;
@@ -181,13 +195,26 @@ export default async function OrderDetailPage({ params }: { params: Promise<{ id
           <Card>
             <CardHeader title="Customer" action={order.customer ? <ButtonLink href={`/customers/${order.customer.id}`} variant="ghost" size="sm">View</ButtonLink> : null} />
             <CardContent className="space-y-3 text-sm">
+              {order.customer_data_status === "restricted" ? (
+                <div className="flex gap-2 rounded-lg border border-amber-200 bg-amber-50/70 px-3 py-2 text-xs text-amber-900">
+                  <ShieldAlert className="mt-px size-4 shrink-0" />
+                  <span>
+                    {order.source === "shopify" ? "Shopify" : "The marketplace"} withheld{" "}
+                    {formatRestricted(order.customer_data_restricted_fields)} (protected customer data). Check the order in{" "}
+                    {order.source === "shopify" ? "Shopify admin" : "the marketplace"} for delivery details.
+                  </span>
+                </div>
+              ) : null}
               <p className="font-medium text-ink">{order.customer_name}</p>
               {order.customer_email ? (
                 <a href={`mailto:${order.customer_email}`} className="flex items-center gap-2 text-ink-2 hover:text-brand-700">
                   <Mail className="size-4 text-faint" /> <span className="truncate">{order.customer_email}</span>
                 </a>
               ) : (
-                <p className="flex items-center gap-2 text-muted"><Mail className="size-4 text-faint" /> No email shared</p>
+                <p className="flex items-center gap-2 text-muted">
+                  <Mail className="size-4 text-faint" />{" "}
+                  {order.customer_data_restricted_fields.includes("email") ? "Email withheld by marketplace" : "No email shared"}
+                </p>
               )}
               {order.customer?.phone ? (
                 <p className="flex items-center gap-2 text-ink-2"><Phone className="size-4 text-faint" /> {order.customer.phone}</p>
@@ -199,7 +226,9 @@ export default async function OrderDetailPage({ params }: { params: Promise<{ id
                     {address.map((l, i) => <span key={i} className="block">{l}</span>)}
                   </address>
                 ) : (
-                  <span className="text-muted">No delivery address</span>
+                  <span className="text-muted">
+                    {order.customer_data_restricted_fields.includes("shipping_address") ? "Address withheld by marketplace" : "No delivery address"}
+                  </span>
                 )}
               </div>
             </CardContent>

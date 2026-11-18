@@ -8,6 +8,8 @@ import { Notice } from "@/components/ui/misc";
 import { SettingsNav } from "@/components/settings/settings-nav";
 import { IntegrationCard } from "@/components/settings/integration-card";
 import { SyncLogTable } from "@/components/settings/sync-log-table";
+import { SyncFailuresPanel } from "@/components/settings/sync-failures-panel";
+import { FAILURE_CURSOR_HOLD_ATTEMPTS } from "@/lib/integrations/sync";
 import { EtsySetupGuide, ShopifySetupGuide } from "@/components/settings/setup-guides";
 import { getIntegrationsOverview } from "@/lib/data/integrations";
 import { hasRole, requireUser } from "@/lib/auth";
@@ -44,6 +46,12 @@ export default async function IntegrationsPage({ searchParams }: { searchParams:
           <IntegrationCard key={i.id} integration={i} canManage={canManage} />
         ))}
       </div>
+
+      {overview.failures.length ? (
+        <div className="mt-5">
+          <SyncFailuresPanel failures={overview.failures} holdAttempts={FAILURE_CURSOR_HOLD_ATTEMPTS} />
+        </div>
+      ) : null}
 
       <div className="mt-5 grid gap-5 lg:grid-cols-[minmax(0,1fr)_380px]">
         <Card className="overflow-hidden">
@@ -82,13 +90,13 @@ export default async function IntegrationsPage({ searchParams }: { searchParams:
       </div>
 
       <div className="mt-5 grid gap-5 lg:grid-cols-2">
-        <Card id="setup-etsy" className="scroll-mt-24">
+        <Card id="setup-etsy" className="min-w-0 scroll-mt-24">
           <CardHeader title="Etsy setup" description="Obtain Etsy Open API v3 credentials." />
           <CardContent>
             <EtsySetupGuide redirectUri={overview.redirect.etsy ?? `${origin}/api/integrations/etsy/callback`} />
           </CardContent>
         </Card>
-        <Card id="setup-shopify" className="scroll-mt-24">
+        <Card id="setup-shopify" className="min-w-0 scroll-mt-24">
           <CardHeader title="Shopify setup" description="Connect the Shopify Admin GraphQL API." />
           <CardContent>
             <ShopifySetupGuide redirectUri={`${origin}/api/integrations/shopify/callback`} store={overview.shopifyStore} />

@@ -2,8 +2,8 @@ import "server-only";
 import { serverEnv } from "@/lib/server-env";
 import { fetchWithRetry, safeText, sleep } from "../http";
 import { IntegrationError } from "../types";
+import { isPermissionError, type GraphQLError } from "./protected-data";
 
-type GraphQLError = { message: string; extensions?: { code?: string } };
 type GraphQLResponse<T> = {
   data?: T;
   errors?: GraphQLError[];
@@ -17,8 +17,12 @@ export class ShopifyClient {
     private readonly apiVersion = serverEnv.shopify.apiVersion,
   ) {}
 
-  /** GraphQL request with cost-based throttle handling. */
-  async graphql<T>(query: string, variables: Record<string, unknown> = {}, attempt = 0): Promise<T> {
+  /**
+   * GraphQL request with cost-based throttle handling. Returns data AND errors
+   * so callers can accept partial results (e.g. protected customer fields).
+   * Transport, auth and throttling failures still throw.
+   */
+  async graphqlRaw<T>(query: string, variables: Record<string, unknown> = {}, attempt = 0): Promise<{ data: T | null; errors: GraphQLError[] }> {
     const res = await fetchWithRetry(
       `https://${this.shop}/admin/api/${this.apiVersion}/graphql.json`,
       {
@@ -43,20 +47,25 @@ export class ShopifyClient {
         ? Math.ceil(((cost.requestedQueryCost - cost.throttleStatus.currentlyAvailable) / Math.max(1, cost.throttleStatus.restoreRate)) * 1000)
         : 2000;
       await sleep(Math.max(1000, wait));
-      return this.graphql<T>(query, variables, attempt + 1);
+      return this.graphqlRaw<T>(query, variables, attempt + 1);
     }
-    if (body.errors?.length) {
-      const msg = body.errors.map((e) => e.message).join("; ");
-      const hint = /access denied|protected customer data/i.test(msg)
-        ? " — the app may need protected customer data access (see README → Shopify)."
-        : "";
-      throw new IntegrationError(`Shopify GraphQL error: ${msg}${hint}`, body.errors);
-    }
-
     // Be a good citizen: pause when the bucket is nearly empty.
     const status = body.extensions?.cost?.throttleStatus;
     if (status && status.currentlyAvailable < 100) await sleep(1000);
-    if (!body.data) throw new IntegrationError("Shopify returned no data");
-    return body.data;
+    return { data: body.data ?? null, errors: body.errors ?? [] };
+  }
+
+  /** Strict GraphQL request: any error is fatal. */
+  async graphql<T>(query: string, variables: Record<string, unknown> = {}): Promise<T> {
+    const { data, errors } = await this.graphqlRaw<T>(query, variables);
+    if (errors.length) {
+      const msg = errors.map((e) => e.message).join("; ");
+      const hint = errors.some(isPermissionError)
+        ? " — the app may be missing a required scope or protected customer data access (see README → Shopify)."
+        : "";
+      throw new IntegrationError(`Shopify GraphQL error: ${msg}${hint}`, errors);
+    }
+    if (!data) throw new IntegrationError("Shopify returned no data");
+    return data;
   }
 }

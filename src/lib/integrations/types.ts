@@ -1,3 +1,4 @@
+import type { Json } from "@/types/database";
 import type { IntegrationProvider } from "@/lib/constants";
 
 /** Normalised order payload accepted by the `ingest_marketplace_order` SQL function. */
@@ -35,6 +36,10 @@ export type NormalisedOrder = {
     marketplace_updated_at: string;
     marketplace_cancelled_at: string | null;
     is_fulfilled: boolean;
+    /** "restricted" when the marketplace withheld customer data (e.g. Shopify protected customer data). */
+    customer_data_status: "available" | "restricted";
+    /** Which customer fields were withheld, e.g. ["customer", "email", "shipping_address"]. */
+    customer_data_restricted_fields: string[];
   };
   items: {
     external_line_item_id: string;
@@ -48,6 +53,8 @@ export type NormalisedOrder = {
     unit_price: number;
     total_price: number;
     personalisation: string | null;
+    /** Untouched original option data from the marketplace (variations / custom attributes). */
+    marketplace_options: Json;
   }[];
 };
 
@@ -58,6 +65,14 @@ export type FetchContext = {
   defaultDispatchDays: number;
   /** Called after each page, so the engine can record progress. */
   onPage?: (page: number) => void;
+  /** Non-fatal problems worth surfacing in the sync log (e.g. restricted customer data). */
+  onWarning?: (warning: SyncWarning) => void;
+};
+
+export type SyncWarning = {
+  code: "customer_data_restricted" | "import_window_limited" | "failures_parked";
+  message: string;
+  details?: Record<string, unknown>;
 };
 
 export type FulfilmentPush = {

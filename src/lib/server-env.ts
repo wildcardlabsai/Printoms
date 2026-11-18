@@ -22,6 +22,8 @@ export const serverEnv = {
     clientSecret: process.env.SHOPIFY_CLIENT_SECRET ?? "",
     adminAccessToken: process.env.SHOPIFY_ADMIN_ACCESS_TOKEN ?? "",
     apiVersion: process.env.SHOPIFY_API_VERSION ?? "2025-10",
+    /** Opt-in: also request read_all_orders (orders older than 60 days). Shopify may require approval. */
+    requestAllOrders: (process.env.SHOPIFY_REQUEST_ALL_ORDERS ?? "").toLowerCase() === "true",
   },
 };
 

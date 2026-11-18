@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
-import { CircleAlert, ExternalLink, KeyRound, Link2, RefreshCw, Unlink } from "lucide-react";
+import { CircleAlert, DatabaseBackup, ExternalLink, KeyRound, Link2, RefreshCw, ShieldAlert, Unlink } from "lucide-react";
 import { Button, ButtonLink } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Dialog, DialogBody, DialogContent, DialogFooter } from "@/components/ui/dialog";
@@ -13,6 +13,7 @@ import { useToast } from "@/components/ui/toast";
 import { disconnectIntegrationAction, updateIntegrationSettingsAction } from "@/lib/actions/settings";
 import { cn, formatDateTime, formatRelative } from "@/lib/utils";
 import type { IntegrationOverview } from "@/lib/data/integrations";
+import { ResyncDialog } from "./resync-dialog";
 
 type Integration = IntegrationOverview["integrations"][number];
 
@@ -28,6 +29,7 @@ export function IntegrationCard({ integration, canManage }: { integration: Integ
   const connected = integration.status === "connected" || integration.status === "error";
   const [syncing, setSyncing] = React.useState(false);
   const [confirmDisconnect, setConfirmDisconnect] = React.useState(false);
+  const [resyncOpen, setResyncOpen] = React.useState(false);
   const [pending, startTransition] = React.useTransition();
   const [enabled, setEnabled] = React.useState(integration.sync_enabled);
   const [interval, setIntervalMinutes] = React.useState(String(integration.sync_interval_minutes));
@@ -90,6 +92,19 @@ export function IntegrationCard({ integration, canManage }: { integration: Integ
           </div>
         ) : null}
 
+        {integration.provider === "shopify" && integration.customer_data_access === "restricted" ? (
+          <div className="flex gap-2 rounded-lg border border-amber-200 bg-amber-50/70 px-3 py-2.5 text-[13px] text-amber-900">
+            <ShieldAlert className="mt-0.5 size-4 shrink-0" />
+            <div>
+              <p className="font-medium">Shopify is withholding customer details</p>
+              <p className="mt-0.5">
+                Orders and items import normally, but names, emails and addresses are marked as restricted. Request protected
+                customer data access for your app in Shopify; details fill in automatically on the next sync once approved.
+              </p>
+            </div>
+          </div>
+        ) : null}
+
         {!integration.config.ready ? (
           <div className="rounded-lg border border-amber-200 bg-amber-50/70 px-3 py-2.5 text-[13px] text-amber-900">
             <p className="flex items-center gap-1.5 font-medium">
@@ -128,6 +143,17 @@ export function IntegrationCard({ integration, canManage }: { integration: Integ
                     : "—",
             },
             { label: "Synced up to", value: integration.sync_cursor ? formatDateTime(integration.sync_cursor) : "Initial import pending" },
+            {
+              label: "Orders awaiting retry",
+              value: integration.open_failures ? <span className="text-red-600">{integration.open_failures}</span> : "None",
+            },
+            {
+              label: "Order history available",
+              value:
+                integration.provider === "shopify" && !integration.has_all_orders_scope
+                  ? `Last ${integration.max_import_days} days (no read_all_orders)`
+                  : `Up to ${integration.max_import_days} days`,
+            },
           ]}
         />
 
@@ -146,9 +172,14 @@ export function IntegrationCard({ integration, canManage }: { integration: Integ
               </Field>
               <Field label="Initial import" htmlFor={`days-${integration.provider}`}>
                 <Select id={`days-${integration.provider}`} value={importDays} onChange={(e) => setImportDays(e.target.value)}>
-                  {[14, 30, 60, 90, 180, 365].map((d) => (
+                  {integration.import_options.map((d) => (
                     <option key={d} value={d}>Last {d} days</option>
                   ))}
+                  {!integration.import_options.includes(integration.initial_import_days) ? (
+                    <option value={integration.initial_import_days} disabled>
+                      Last {integration.initial_import_days} days (not available)
+                    </option>
+                  ) : null}
                 </Select>
               </Field>
             </div>
@@ -182,6 +213,9 @@ export function IntegrationCard({ integration, canManage }: { integration: Integ
               <Button onClick={syncNow} loading={syncing} disabled={!integration.config.ready}>
                 <RefreshCw /> Sync now
               </Button>
+              <Button variant="outline" onClick={() => setResyncOpen(true)} disabled={!integration.config.ready}>
+                <DatabaseBackup /> {integration.pending_resync ? "Resume resync" : "Full resync"}
+              </Button>
               <Button variant="ghost" onClick={() => setConfirmDisconnect(true)}>
                 <Unlink /> Disconnect
               </Button>
@@ -199,6 +233,18 @@ export function IntegrationCard({ integration, canManage }: { integration: Integ
             Setup guide <ExternalLink />
           </ButtonLink>
         </div>
+      ) : null}
+
+      {canManage && connected ? (
+        <ResyncDialog
+          provider={integration.provider}
+          name={brand.name}
+          options={integration.import_options}
+          maxDays={integration.max_import_days}
+          pendingFrom={integration.pending_resync}
+          open={resyncOpen}
+          onOpenChange={setResyncOpen}
+        />
       ) : null}
 
       <Dialog open={confirmDisconnect} onOpenChange={setConfirmDisconnect}>

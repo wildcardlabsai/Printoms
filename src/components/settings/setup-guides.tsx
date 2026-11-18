@@ -9,7 +9,7 @@ function Step({ n, children }: { n: number; children: React.ReactNode }) {
   );
 }
 
-const code = "rounded bg-subtle px-1 py-px font-mono text-[12px] text-ink ring-1 ring-line";
+const code = "rounded bg-subtle px-1 py-px font-mono text-[12px] text-ink ring-1 ring-line [overflow-wrap:anywhere]";
 
 export function EtsySetupGuide({ redirectUri }: { redirectUri: string }) {
   return (

@@ -1,5 +1,7 @@
 import type { NormalisedOrder } from "../types";
 import { addBusinessDays } from "@/lib/utils";
+import { splitOptions } from "../personalisation";
+import type { Json } from "@/types/database";
 
 /** Subset of the Etsy v3 ShopReceipt shape that PrintFlow uses. */
 export type EtsyMoney = { amount: number; divisor: number; currency_code: string };
@@ -11,7 +13,9 @@ export type EtsyTransaction = {
   product_id: number | null;
   sku: string | null;
   price: EtsyMoney;
-  variations?: { formatted_name: string; formatted_value: string }[];
+  variations?: { property_id?: number; value_id?: number | null; formatted_name: string; formatted_value: string }[];
+  /** Not documented on every API version; read defensively if Etsy supplies it. */
+  personalization?: unknown;
   expected_ship_date?: number | null;
   shipping_method?: string | null;
 };
@@ -56,7 +60,23 @@ function paymentStatus(r: EtsyReceipt): NormalisedOrder["order"]["payment_status
   return "pending";
 }
 
-const PERSONALISATION = /personali[sz]ation/i;
+/** Personalisation supplied outside `variations` (string, or list of {question, answer}). */
+function transactionLevelPersonalisation(value: unknown): { name: string; value: string }[] {
+  if (typeof value === "string") return value.trim() ? [{ name: "Personalization", value }] : [];
+  if (Array.isArray(value)) {
+    return value.flatMap((v) => {
+      if (typeof v === "string") return v.trim() ? [{ name: "Personalization", value: v }] : [];
+      if (v && typeof v === "object") {
+        const o = v as Record<string, unknown>;
+        const name = String(o.question ?? o.label ?? o.name ?? o.formatted_name ?? "Personalization");
+        const val = o.answer ?? o.value ?? o.formatted_value;
+        return typeof val === "string" && val.trim() ? [{ name, value: val }] : [];
+      }
+      return [];
+    });
+  }
+  return [];
+}
 
 export function mapEtsyReceipt(r: EtsyReceipt, defaultDispatchDays: number): NormalisedOrder {
   const created = iso(r.created_timestamp ?? r.create_timestamp) ?? new Date().toISOString();
@@ -99,11 +119,16 @@ export function mapEtsyReceipt(r: EtsyReceipt, defaultDispatchDays: number): Nor
       marketplace_updated_at: updated,
       marketplace_cancelled_at: cancelled ? updated : null,
       is_fulfilled: r.is_shipped,
+      customer_data_status: "available",
+      customer_data_restricted_fields: [],
     },
     items: r.transactions.map((t) => {
       const variations = t.variations ?? [];
-      const personal = variations.filter((v) => PERSONALISATION.test(v.formatted_name));
-      const rest = variations.filter((v) => !PERSONALISATION.test(v.formatted_name));
+      const labelled = [
+        ...variations.map((v) => ({ name: v.formatted_name, value: v.formatted_value })),
+        ...transactionLevelPersonalisation(t.personalization),
+      ];
+      const { personalisation, variations: rest } = splitOptions(labelled);
       const unit = money(t.price);
       return {
         external_line_item_id: String(t.transaction_id),
@@ -111,12 +136,17 @@ export function mapEtsyReceipt(r: EtsyReceipt, defaultDispatchDays: number): Nor
         external_variant_id: t.product_id ? String(t.product_id) : null,
         sku: t.sku || null,
         title: t.title?.trim() || "Etsy item",
-        variant_title: rest.map((v) => v.formatted_value).join(" / ") || null,
-        variant_details: rest.map((v) => ({ name: v.formatted_name, value: v.formatted_value })),
+        variant_title: rest.map((v) => v.value).join(" / ") || null,
+        variant_details: rest,
         quantity: t.quantity,
         unit_price: unit,
         total_price: unit * t.quantity,
-        personalisation: personal.map((v) => v.formatted_value).join("\n") || null,
+        personalisation,
+        // Original data, untouched, so classification can always be audited or redone.
+        marketplace_options: {
+          variations,
+          ...(t.personalization !== undefined ? { personalization: t.personalization as Json } : {}),
+        },
       };
     }),
   };

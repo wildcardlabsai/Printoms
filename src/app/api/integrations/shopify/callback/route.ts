@@ -49,7 +49,7 @@ export async function GET(request: NextRequest) {
         display_name: info.name,
         shop_domain: info.myshopifyDomain,
         external_shop_id: info.myshopifyDomain,
-        scopes: token.scope.split(","),
+        scopes: token.scope.split(",").map((s) => s.trim()).filter(Boolean),
         connected_at: new Date().toISOString(),
         connected_by: userId,
         last_error: null,

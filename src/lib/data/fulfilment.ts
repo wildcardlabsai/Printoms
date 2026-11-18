@@ -1,7 +1,7 @@
 import "server-only";
 import { createClient } from "@/lib/supabase/server";
 
-const SELECT = `id, order_number, source, external_order_id, external_order_number, customer_name, customer_email, shipping_address,
+const SELECT = `id, order_number, source, customer_data_status, customer_data_restricted_fields, external_order_id, external_order_number, customer_name, customer_email, shipping_address,
   shipping_method, dispatch_by, status, priority, production_notes, customer_note, total, currency, is_sample, dispatched_at, tracking_number, carrier,
   order_items(id, title, variant_title, quantity, personalisation, sku, product:products(name, sku)),
   shipments(id, status, carrier, tracking_number, tracking_url, shipping_method, packaging_notes, checklist, packed_at, dispatched_at,

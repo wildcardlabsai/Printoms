@@ -110,6 +110,15 @@ export function OrderItemCard({
             ) : null}
           </div>
 
+          {item.marketplace_options ? (
+            <details className="mt-2 text-xs text-muted">
+              <summary className="cursor-pointer select-none hover:text-ink">Original marketplace options</summary>
+              <pre className="mt-1.5 max-h-48 overflow-auto rounded-md bg-subtle p-2 font-mono text-[11px] whitespace-pre-wrap text-ink-2 ring-1 ring-line">
+                {JSON.stringify(item.marketplace_options, null, 2)}
+              </pre>
+            </details>
+          ) : null}
+
           {mapping ? (
             <div className="mt-3 flex flex-col gap-2 sm:flex-row">
               <Select value={productId} onChange={(e) => setProductId(e.target.value)} aria-label="Product">

@@ -126,7 +126,11 @@ export function FulfilmentCard({
               {address.length ? (
                 <address className="text-ink-2 not-italic leading-relaxed">{address.map((l, i) => <span key={i} className="block">{l}</span>)}</address>
               ) : (
-                <p className="text-muted">No delivery address on this order</p>
+                <p className={order.customer_data_restricted_fields.includes("shipping_address") ? "font-medium text-amber-800" : "text-muted"}>
+                  {order.customer_data_restricted_fields.includes("shipping_address")
+                    ? `Address withheld by ${order.source === "shopify" ? "Shopify" : "the marketplace"} — copy it from the marketplace before shipping`
+                    : "No delivery address on this order"}
+                </p>
               )}
               {order.customer_email ? <p className="mt-1.5 text-xs text-muted">{order.customer_email}</p> : null}
             </div>

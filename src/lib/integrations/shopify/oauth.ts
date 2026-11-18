@@ -14,10 +14,15 @@ export const SHOPIFY_SCOPES = [
   "write_merchant_managed_fulfillment_orders",
 ];
 
+/** Scopes to request. read_all_orders is only requested when explicitly enabled. */
+export function requestedShopifyScopes() {
+  return serverEnv.shopify.requestAllOrders ? [...SHOPIFY_SCOPES, "read_all_orders"] : SHOPIFY_SCOPES;
+}
+
 export function shopifyAuthorizeUrl(state: string, redirectUri: string) {
   const params = new URLSearchParams({
     client_id: serverEnv.shopify.clientId,
-    scope: SHOPIFY_SCOPES.join(","),
+    scope: requestedShopifyScopes().join(","),
     redirect_uri: redirectUri,
     state,
   });
