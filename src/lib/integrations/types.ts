@@ -40,6 +40,8 @@ export type NormalisedOrder = {
     customer_data_status: "available" | "restricted";
     /** Which customer fields were withheld, e.g. ["customer", "email", "shipping_address"]. */
     customer_data_restricted_fields: string[];
+    /** True when `items` is the marketplace's complete line-item list, so missing lines mean removed. */
+    items_complete: boolean;
   };
   items: {
     external_line_item_id: string;
@@ -77,17 +79,25 @@ export type SyncWarning = {
 
 export type FulfilmentPush = {
   externalOrderId: string;
+  /** PrintFlow carrier label; adapters map it via the carrier registry. */
   carrier: string | null;
-  trackingNumber: string | null;
+  trackingNumber: string;
   trackingUrl: string | null;
 };
+
+export type FulfilmentResult = { externalId: string | null; response: unknown };
 
 export interface MarketplaceAdapter {
   provider: IntegrationProvider;
   /** Iterate pages of orders updated since `ctx.since` (oldest first where supported). */
   fetchOrders(ctx: FetchContext): AsyncGenerator<OrderPage>;
-  /** Send tracking details back to the marketplace. Returns an external reference. */
-  pushFulfilment(input: FulfilmentPush): Promise<{ externalId: string | null }>;
+  /** Send tracking details back to the marketplace. */
+  pushFulfilment(input: FulfilmentPush): Promise<FulfilmentResult>;
+  /**
+   * Is this tracking number already on the marketplace order? Used before every
+   * submission so a retry after an ambiguous outcome never creates a duplicate.
+   */
+  findExistingFulfilment(input: FulfilmentPush): Promise<{ externalId: string | null } | null>;
 }
 
 export class IntegrationError extends Error {
@@ -95,6 +105,8 @@ export class IntegrationError extends Error {
     message: string,
     public readonly details?: unknown,
     public readonly retryable = false,
+    /** HTTP status from the marketplace, when there was one. */
+    public readonly status?: number,
   ) {
     super(message);
   }

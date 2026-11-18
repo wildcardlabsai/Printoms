@@ -112,9 +112,18 @@ describe("full resynchronisation", () => {
     assert.equal(a.order_items[0]!.quantity, 2, "marketplace quantity updated on the item");
     assert.equal(a.order_items[0]!.production_jobs!.stage, "printing", "production progress preserved");
     assert.equal(a.order_items[0]!.production_jobs!.printer_id, printerId, "printer assignment preserved");
-    assert.equal(a.order_items[0]!.production_jobs!.quantity, 1, "a job already printing keeps its quantity");
-    const { data: liveRun } = await db.from("print_runs").select("status").eq("id", runId).single();
+    // Phase 2 (line-item reconciliation) supersedes the Phase 1 rule "a job
+    // already printing keeps its quantity": silently keeping 1 would ship the
+    // customer one item short. The running print must still be untouched —
+    // the extra unit is added as pending, and packing is blocked until printed.
+    assert.equal(a.order_items[0]!.production_jobs!.quantity, 2, "the job now needs the marketplace quantity");
+    const { data: liveRun } = await db.from("print_runs").select("status, quantity").eq("id", runId).single();
     assert.equal(liveRun!.status, "printing");
+    assert.equal(liveRun!.quantity, 1, "the running print is not changed");
+    const { data: units } = await db.from("production_units").select("status").eq("production_job_id", a.order_items[0]!.production_jobs!.id).order("unit_number");
+    assert.deepEqual(units!.map((u) => u.status), ["printing", "pending"], "printing unit untouched; one extra unit to print");
+    const { error: packError } = await db.rpc("assert_order_shippable", { p_order_id: a.id });
+    assert.ok(packError, "cannot be packed while a unit is still to print");
     const { count: notes } = await db.from("internal_notes").select("id", { count: "exact", head: true }).eq("entity_id", a.id);
     assert.equal(notes, 1);
 

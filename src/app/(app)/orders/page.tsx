@@ -44,6 +44,7 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
 
   const tabs: { id: OrderView; label: string; count?: number }[] = [
     { id: "active", label: "Active", count: counts.active },
+    ...(counts.review ? [{ id: "review" as const, label: "Needs review", count: counts.review }] : []),
     { id: "overdue", label: "Overdue", count: counts.overdue },
     { id: "due_soon", label: "Due in 48h", count: counts.due_soon },
     { id: "new", label: "New", count: counts.new },

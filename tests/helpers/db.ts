@@ -73,7 +73,16 @@ export async function snapshotIntegrations() {
 
 /** Remove only test-created marketplace orders/customers/failures (prefix based). */
 export async function cleanupTestOrders(externalPrefix: string) {
+  // Customers created for these test orders (e.g. the "Shopify customer"
+  // placeholder used when an order has no customer data). Removed below only
+  // if, once the test orders are gone, they have no other orders.
+  const { data: testOrders } = await db.from("orders").select("customer_id").like("external_order_id", `${externalPrefix}%`);
+  const customerIds = [...new Set((testOrders ?? []).map((o) => o.customer_id).filter((id): id is string => Boolean(id)))];
   await db.from("orders").delete().like("external_order_id", `${externalPrefix}%`);
+  for (const id of customerIds) {
+    const { count } = await db.from("orders").select("id", { count: "exact", head: true }).eq("customer_id", id);
+    if (count === 0) await db.from("customers").delete().eq("id", id);
+  }
   await db.from("sync_failures").delete().like("external_order_id", `${externalPrefix}%`);
   await db.from("customers").delete().like("display_name", "Test Buyer %");
   await db.from("customers").delete().like("display_name", "Shop Buyer %");

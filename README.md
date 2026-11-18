@@ -30,7 +30,7 @@ It's a working, database-backed application, not a set of mock screens. Every fi
 | --- | --- |
 | **Overview** | Live KPIs (new today, awaiting production, printing, ready to pack, awaiting dispatch, overdue, sales by channel), a 30-day sales chart, source breakdown, production queue, deadlines, printer availability and recent activity. |
 | **All Orders** | Unified Etsy, Shopify and manual orders, with search, view tabs, filters, sorting and pagination. Order detail shows per-item production status, personalisation, customer notes, internal notes, editable priority and deadline, a full history timeline, and hold/cancel/complete actions. Includes a manual order form. |
-| **Production Board** | Kanban with nine stages and drag-and-drop (mouse, touch and keyboard). Each order item is its own job. Moving a card into *Printing* starts a tracked print run, and moving it out records the outcome. On mobile it becomes a stage picker with a "Move to…" menu. |
+| **Production Board** | Kanban with nine stages and drag-and-drop (mouse, touch and keyboard). Each order item is its own job. Moving a card into *Printing* starts a tracked print run, and moving it out records the outcome. On mobile it becomes a stage picker with a "Move to…" menu. Every job tracks its **physical units**, so a 5-item job shows how many units are printed, printing, passed and outstanding. Plates can print some of the units, partial failures re-queue only the failed units, and a job can't move to packing with units unprinted unless you confirm. |
 | **Print Farm** | Bambu Lab A1, Flashforge AD5X and Flashforge Adventurer 5M come pre-registered. Each printer has status, its current job with elapsed time against the estimate, a per-printer queue, a maintenance log, print history and a failure log. Failed prints are re-queued for the **same job**, so the order is never duplicated. |
 | **Packing & Dispatch** | Ready-to-pack orders, a configurable packing checklist, delivery details, items and quantities with personalisation, carrier/tracking/postage capture, and dispatch history. You can send tracking back to Etsy or Shopify. |
 | **Products** | Catalogue with SKU, images (Supabase Storage), category, STL/3MF reference, print time, material, filament estimate, default printer, instructions and costs. Each product can have **multiple marketplace listings**, kept separately per marketplace, plus an estimated unit cost and margin. |
@@ -103,6 +103,9 @@ The migrations live in `supabase/migrations/`:
 | `…05_analytics.sql` | `dashboard_metrics`, `analytics_report`, and the customer/filament summary views |
 | `…06_customer_merge.sql` | Explicit, atomic customer merge |
 | `…20261119000001_sync_reliability.sql` | Phase 1: `sync_failures` retry queue, sync-log retry/recovery counters and warnings, `orders.customer_data_status`, `order_items.marketplace_options`, the `resync` trigger and the updated `ingest_marketplace_order` (force mode, restricted-customer handling). Additive only. |
+| `…20261119000002_production_units.sql` | Phase 2: `production_units` (one row per physical item) and `print_run_units`, per-job unit counters, partial-plate `start_print_run`/`finish_print_run`, `record_qc_failure`. Backfills units for existing jobs from their stage and history. Additive only. |
+| `…20261119000003_order_reconciliation.sql` | Phase 2: `order_reviews` (marketplace changes needing a decision), `orders.requires_review`, line-item status columns, `apply_order_cancellation`, `reopen_cancelled_order`, `resolve_order_review`, the `assert_order_shippable` guard on pack/dispatch, and the reconciling `ingest_marketplace_order`. Additive only. |
+| `…20261119000004_fulfilment_and_failures.sql` | Phase 2: `fulfilment_submissions` (every tracking submission, one in flight per shipment), `sync_failure_events` (failure audit history), dismiss/reopen for failed orders. Additive only. |
 
 **Hosted Supabase:**
 
@@ -138,29 +141,41 @@ Access tokens last one hour and are refreshed automatically. Etsy rotates refres
 
 ## Scheduled sync (every 10 minutes)
 
-`vercel.json` schedules `GET /api/cron/sync` every 10 minutes. Vercel sends `Authorization: Bearer $CRON_SECRET` automatically when `CRON_SECRET` is set. Each integration then syncs only when its own `sync_interval_minutes` is due, which you can change per integration in the UI.
+Each marketplace syncs **independently**, with its own endpoint, function run, time budget, lock, cursor and log:
+`GET /api/cron/sync/etsy` and `GET /api/cron/sync/shopify`. Both require `Authorization: Bearer $CRON_SECRET`. The combined `/api/cron/sync` still works and runs both in parallel, isolated from each other.
 
-> **Vercel Hobby plans only allow daily cron jobs.** Use a Pro plan, or call the endpoint from any external scheduler, such as Supabase `pg_cron` + `pg_net`, GitHub Actions, or an uptime monitor:
+> **A server-side scheduler is required.** `vercel.json` deliberately contains no cron jobs, because Vercel **Hobby** rejects any cron more frequent than once a day. Choose one of these:
+> - Supabase `pg_cron` + `pg_net` (recommended, works on any plan)
+> - Vercel Pro crons
+> - the included GitHub Actions workflow
 >
-> ```bash
-> curl -H "Authorization: Bearer $CRON_SECRET" https://YOUR-DOMAIN/api/cron/sync
-> ```
+> Step-by-step instructions are in **[docs/scheduling.md](docs/scheduling.md)**.
 
 ### How a sync works
 
 - **Lock:** a database lock (`acquire_sync_lock`) stops cron and manual runs from overlapping.
 - **Incremental:** each run fetches from the stored high-water mark minus a 5-minute overlap. A first run imports the configurable *initial import* window (60 days by default).
 - **Pagination:** Etsy uses offset paging (100 per page); Shopify uses cursor paging (50 per page) with cost-based throttling.
-- **Retries:** network errors, 429s and 5xx responses are retried with exponential backoff and jitter, honouring `Retry-After`.
+- **Retries:** reads (GET, GraphQL queries) are retried on network errors, 429s and 5xx with exponential backoff and jitter, honouring `Retry-After`. **Writes** (tracking submissions, mutations, token exchange) are only retried automatically on 429 — never after a timeout or 5xx, because the marketplace may already have applied them.
 - **Idempotent ingest:** every order goes through `ingest_marketplace_order`. It upserts on **(marketplace, external order ID)**, overwrites only marketplace-owned columns, and never touches internal notes, priority, deadlines or production stages. Line items upsert on their marketplace line ID.
 - **Historical orders:** orders already shipped on the marketplace when first imported arrive as *completed*, so a backfill doesn't flood the production board. Orders cancelled on the marketplace are marked *cancelled*.
-- **Failed-order recovery:** an order that fails to import is recorded in `sync_failures` with its payload and error, and shown on the Integrations page. The cursor is held at that order for up to 3 attempts so it's fetched again from the marketplace. After that it is retried from the stored payload on every run, and it is cleared the moment it imports. Stale retries can never overwrite newer marketplace data.
+- **Failed-order recovery:** an order that fails to import is recorded in `sync_failures` with its payload and error, and shown under **Settings → Integrations → Failed orders** (Open / Dismissed / Resolved, each with its full history). The cursor is held at that order for up to 3 attempts so it's fetched again from the marketplace. After that it is retried from the stored payload on every run, and it is cleared the moment it imports. Stale retries can never overwrite newer marketplace data. Admins can **Retry now** (same idempotent ingest), **Dismiss** with a required reason (it then stops being retried, no longer holds the cursor, and stays dismissed even if it fails again) or **Reopen** it. Each open failure shows when it will next be retried.
+- **Marketplace changes after import:** cancellations, added/removed lines, quantity, variation and personalisation changes are reconciled against production. Anything that can be applied safely (nothing printed yet) is applied and logged; anything that affects work already started raises an **order review** ("Needs review" tab) and blocks packing/dispatch until someone decides — close the jobs (printed items kept as surplus), reprint affected units, return to production, or acknowledge. Printed work is never discarded automatically.
 - **Personalisation:** Etsy variations and Shopify line-item properties are classified by label. Labels such as *Personalisation*, *Custom text*, *Name to engrave*, *Enter your name* and *Gift message* become personalisation; *Size*, *Colour*, *Material* and so on stay variations. The untouched original data is kept in `order_items.marketplace_options`.
 - **Full resync (admins):** **Settings → Integrations → Full resync** re-applies marketplace data to every order in a chosen window, even when the marketplace timestamp hasn't changed. It never duplicates orders or jobs and never changes notes, priorities, deadlines, printer assignments, stages, print history or shipments. It is logged, requires confirmation, and can be resumed if it pauses.
 - **Fault isolation:** one bad order is logged without failing the run. After repeated failures the schedule backs off (10 → 20 → 40 minutes, up to 6 hours).
 - **Time budget:** a run stops pulling new pages after 4 minutes, and the next run continues from the cursor.
 
-**Fulfilment push-back:** after dispatch, **Send tracking** on a shipment calls Etsy's `createReceiptShipment` or Shopify's `fulfillmentCreate`. The result is recorded on the shipment as sent or failed, with the error.
+**Fulfilment push-back:** after dispatch, **Send tracking** on a shipment calls Etsy's `createReceiptShipment` or Shopify's `fulfillmentCreate`. Safeguards:
+
+- only real, dispatched marketplace orders (never sample or manual orders), with a validated tracking number (placeholders such as `TBC` are rejected) and an https tracking link;
+- carriers are mapped to each marketplace's names (`src/lib/integrations/carriers.ts`);
+- one submission in flight per shipment, and "sent" is final;
+- before every submission the marketplace is checked for the tracking number, so a retry after a timeout never creates a duplicate fulfilment;
+- each attempt is stored in `fulfilment_submissions` with its request, response and an error category (credentials, rate limited, rejected, marketplace error, network);
+- the order's dispatch status is never changed by a failed push, and **Retry sending tracking** is always safe.
+
+**Verify on a live store before relying on it:** Etsy's accepted `carrier_name` values for your shipping country, and that Shopify accepts the mapped company names for your store.
 
 **Webhooks (future phase):** the `MarketplaceAdapter` interface and the `webhook` value in `sync_trigger` are already in place. A webhook route would verify the signature and call `runSync(provider, "webhook")` or ingest the payload directly.
 
@@ -253,8 +268,9 @@ npm run typecheck     # tsc --noEmit
 npm run lint          # eslint (Next core-web-vitals + TypeScript)
 npm run build         # production build
 npm run test:unit         # pure logic: personalisation, Shopify permission errors, import windows, cursor, resync validation
-npm run test:integration  # sync engine against fake Etsy/Shopify APIs on a LOCAL Supabase stack (refuses remote databases)
+npm run test:integration  # sync, reconciliation, production units, fulfilment and failure management against fake Etsy/Shopify APIs on a LOCAL Supabase stack (refuses remote databases)
 npm test                  # both
+E2E_EMAIL=… E2E_PASSWORD=… npm run test:e2e   # browser regression (desktop + iPhone) against the running app on localhost; creates and removes its own test records
 ```
 
 These were verified during development against a local Supabase stack:

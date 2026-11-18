@@ -2,7 +2,7 @@ import "server-only";
 import { createClient } from "@/lib/supabase/server";
 import type { OrderSource, OrderStatus, PaymentStatus } from "@/lib/constants";
 
-export const ORDER_VIEWS = ["active", "overdue", "due_soon", "new", "in_production", "ready", "dispatched", "all"] as const;
+export const ORDER_VIEWS = ["active", "review", "overdue", "due_soon", "new", "in_production", "ready", "dispatched", "all"] as const;
 export type OrderView = (typeof ORDER_VIEWS)[number];
 
 export const ORDER_SORTS = {
@@ -41,7 +41,7 @@ export async function listOrders(params: OrderListParams) {
   let query = supabase
     .from("orders")
     .select(
-      "id, order_number, source, external_order_id, external_order_number, customer_name, customer_email, order_date, payment_status, status, priority, dispatch_by, total, currency, is_sample, order_items(quantity)",
+      "id, order_number, source, external_order_id, external_order_number, customer_name, customer_email, order_date, payment_status, status, priority, dispatch_by, total, currency, is_sample, requires_review, order_items(quantity)",
       { count: "exact" },
     );
 
@@ -70,6 +70,9 @@ export async function listOrders(params: OrderListParams) {
       break;
     case "dispatched":
       query = query.in("status", ["dispatched", "completed"]);
+      break;
+    case "review":
+      query = query.eq("requires_review", true);
       break;
     case "all":
       break;
@@ -105,7 +108,7 @@ export async function getOrderViewCounts() {
   const supabase = await createClient();
   const now = new Date().toISOString();
   const head = { count: "exact" as const, head: true };
-  const [active, overdue, dueSoon, fresh, inProd, ready] = await Promise.all([
+  const [active, overdue, dueSoon, fresh, inProd, ready, review] = await Promise.all([
     supabase.from("orders").select("id", head).not("status", "in", "(completed,cancelled)"),
     supabase.from("orders").select("id", head).lt("dispatch_by", now).not("status", "in", CLOSED),
     supabase
@@ -117,6 +120,7 @@ export async function getOrderViewCounts() {
     supabase.from("orders").select("id", head).eq("status", "new"),
     supabase.from("orders").select("id", head).eq("status", "in_production"),
     supabase.from("orders").select("id", head).in("status", ["ready_to_pack", "packed"]),
+    supabase.from("orders").select("id", head).eq("requires_review", true),
   ]);
   return {
     active: active.count ?? 0,
@@ -125,6 +129,7 @@ export async function getOrderViewCounts() {
     new: fresh.count ?? 0,
     in_production: inProd.count ?? 0,
     ready: ready.count ?? 0,
+    review: review.count ?? 0,
   };
 }
 
@@ -137,12 +142,15 @@ export async function getOrder(id: string) {
        customer:customers(id, display_name, email, phone),
        order_items(*, product:products(id, name, sku, image_path, material, default_colour),
          production_jobs(id, job_number, stage, priority, printer_id, quantity, attempt_count, failed_attempts,
-           estimated_print_minutes, material, colour, notes, printer:printers!production_jobs_printer_id_fkey(id, name))),
-       shipments(*)`,
+           estimated_print_minutes, material, colour, notes, cancelled_at, cancellation_reason,
+           quantity_printed, quantity_pending, quantity_surplus, printer:printers!production_jobs_printer_id_fkey(id, name))),
+       shipments(*),
+       order_reviews(*, resolved_by_profile:profiles(full_name, email))`,
     )
     .eq("id", id)
     .order("created_at", { referencedTable: "order_items", ascending: true })
     .order("created_at", { referencedTable: "shipments", ascending: false })
+    .order("detected_at", { referencedTable: "order_reviews", ascending: false })
     .maybeSingle();
   if (error) throw new Error(error.message);
   return order;

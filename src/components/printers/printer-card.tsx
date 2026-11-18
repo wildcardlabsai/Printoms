@@ -301,6 +301,11 @@ export function PrinterCard({
                 defaultOutcome={finish}
                 estimatedGrams={job?.estimated_filament_g}
                 preferredMaterial={job?.material}
+                runUnits={(printer.current_run?.print_run_units ?? []).map((ru) => ({
+                  id: ru.unit_id,
+                  unit_number: ru.unit?.unit_number ?? 0,
+                  label: ru.unit?.printed_personalisation?.split("\n")[0] ?? null,
+                }))}
                 filament={filament}
                 onDone={() => {
                   setFinish(null);

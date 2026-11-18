@@ -12,6 +12,7 @@ import { PrintRunBadge, PriorityBadge, StageBadge, SourceBadge } from "@/compone
 import { useToast } from "@/components/ui/toast";
 import { ActivityTimeline } from "@/components/orders/activity-timeline";
 import { FinishPrintForm } from "@/components/printers/finish-print-form";
+import { JobUnits } from "./job-units";
 import { assignPrinterAction, getJobDetailAction, startPrintAction, updateJobAction } from "@/lib/actions/production";
 import { MATERIALS, PRINTER_STATUS, PRIORITIES, PRIORITY, type PriorityLevel } from "@/lib/constants";
 import { endOfDayIso, toDateInput } from "@/lib/dates";
@@ -140,6 +141,7 @@ function JobDetailContent({ jobId, printers, canWrite }: { jobId: string; printe
   const [finishing, setFinishing] = React.useState<"success" | "failure" | null>(null);
   const [pending, startTransition] = React.useTransition();
   const [version, setVersion] = React.useState(0);
+  const [startQty, setStartQty] = React.useState("");
 
   React.useEffect(() => {
     let cancelled = false;
@@ -172,6 +174,9 @@ function JobDetailContent({ jobId, printers, canWrite }: { jobId: string; printe
 
   const job = detail?.job;
   const activeRun = detail?.runs.find((r) => r.status === "printing");
+  const pendingUnits = detail?.units.filter((u) => u.status === "pending").length ?? 0;
+  const qty = Math.min(Math.max(1, Number(startQty) || pendingUnits || 1), Math.max(1, pendingUnits));
+  const showUnits = Boolean(job && detail && (job.quantity > 1 || detail.units.some((u) => u.failed_attempts > 0 || u.status === "surplus")));
   const canStart = job && !activeRun && ["new_order", "awaiting_preparation", "ready_to_print", "quality_check"].includes(job.stage);
   const variants = Array.isArray(job?.item?.variant_details) ? (job!.item!.variant_details as { name?: string; value?: string }[]) : [];
 
@@ -257,6 +262,19 @@ function JobDetailContent({ jobId, printers, canWrite }: { jobId: string; printe
                 ) : null}
               </Section>
 
+              {showUnits && job ? (
+                <Section title="Units">
+                  <JobUnits
+                    jobId={job.id}
+                    quantity={job.quantity}
+                    units={detail.units}
+                    currentPersonalisation={job.item?.personalisation ?? null}
+                    canWrite={canWrite}
+                    onChanged={refresh}
+                  />
+                </Section>
+              ) : null}
+
               <Section title="Job settings">
                 <JobEditForm key={job.updated_at} detail={detail} canWrite={canWrite} onSaved={refresh} />
               </Section>
@@ -284,6 +302,7 @@ function JobDetailContent({ jobId, printers, canWrite }: { jobId: string; printe
                           defaultOutcome={finishing}
                           estimatedGrams={job.estimated_filament_g}
                           preferredMaterial={job.material}
+                          runUnits={(activeRun.print_run_units ?? []).map((ru) => ({ id: ru.unit_id, unit_number: ru.unit?.unit_number ?? 0 }))}
                           filament={detail.filament.map((f) => ({ ...f, remaining_g: f.remaining_g == null ? null : Number(f.remaining_g) }))}
                           onDone={() => {
                             setFinishing(null);
@@ -298,8 +317,23 @@ function JobDetailContent({ jobId, printers, canWrite }: { jobId: string; printe
                       )
                     ) : null}
                   </div>
+                ) : canWrite && canStart && pendingUnits === 0 ? (
+                  <p className="text-sm text-muted">Every unit has been printed.{job.stage === "quality_check" ? " Check them, then move the job to Ready to Pack." : ""}</p>
                 ) : canWrite && canStart ? (
                   <div className="space-y-2">
+                    {pendingUnits > 1 ? (
+                      <Field label={`Units on this plate (${pendingUnits} still to print)`} htmlFor={`qty-${job.id}`}>
+                        <Input
+                          id={`qty-${job.id}`}
+                          type="number"
+                          min={1}
+                          max={pendingUnits}
+                          inputMode="numeric"
+                          value={startQty || String(pendingUnits)}
+                          onChange={(e) => setStartQty(e.target.value)}
+                        />
+                      </Field>
+                    ) : null}
                     <Select value={printerId} onChange={(e) => setPrinterId(e.target.value)} aria-label="Printer">
                       <option value="">Choose a printer…</option>
                       {printers.map((p) => (
@@ -317,7 +351,7 @@ function JobDetailContent({ jobId, printers, canWrite }: { jobId: string; printe
                       >
                         Add to queue
                       </Button>
-                      <Button disabled={!printerId} loading={pending} onClick={() => runAction(() => startPrintAction(job.id, printerId))}>
+                      <Button disabled={!printerId} loading={pending} onClick={() => runAction(() => startPrintAction(job.id, printerId, pendingUnits > 1 ? qty : null))}>
                         <Play /> Start print
                       </Button>
                     </div>
@@ -347,6 +381,13 @@ function JobDetailContent({ jobId, printers, canWrite }: { jobId: string; printe
                           {formatDateTime(r.started_at)}
                           {r.ended_at ? ` → ${formatMinutes((new Date(r.ended_at).getTime() - new Date(r.started_at).getTime()) / 60000)}` : ""}
                         </p>
+                        {r.quantity > 1 || (r.quantity_failed ?? 0) > 0 ? (
+                          <p className="mt-1 text-ink-2">
+                            {r.quantity} unit{r.quantity === 1 ? "" : "s"}
+                            {r.quantity_succeeded != null ? ` · ${r.quantity_succeeded} ok` : ""}
+                            {r.quantity_failed ? <span className="text-red-700"> · {r.quantity_failed} failed</span> : null}
+                          </p>
+                        ) : null}
                         {r.failure_reason ? <p className="mt-1 font-medium text-red-700">{r.failure_reason}</p> : null}
                         {r.notes ? <p className="mt-1 text-ink-2">{r.notes}</p> : null}
                         {r.status !== "printing" && !r.filament_recorded ? (

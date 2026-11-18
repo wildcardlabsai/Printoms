@@ -27,7 +27,7 @@ export class EtsyClient {
     const res = await fetchWithRetry(`${API}${path}`, {
       headers: { "x-api-key": etsyApiKeyHeader(), Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
     }, { label: `Etsy GET ${path}` });
-    if (!res.ok) throw new IntegrationError(`Etsy API error (HTTP ${res.status}) for ${path}`, await safeText(res));
+    if (!res.ok) throw new IntegrationError(`Etsy API error (HTTP ${res.status}) for ${path}`, await safeText(res), res.status === 429 || res.status >= 500, res.status);
     return (await res.json()) as T;
   }
 
@@ -57,6 +57,8 @@ export class EtsyClient {
       throw new IntegrationError(
         "Etsy access could not be refreshed. The connection may have been revoked or expired — reconnect Etsy.",
         e instanceof IntegrationError ? e.details : String(e),
+        false,
+        401,
       );
     }
   }
@@ -77,9 +79,11 @@ export class EtsyClient {
       { label: `Etsy ${init.method ?? "GET"} ${path.split("?")[0]}` },
     );
     if (res.status === 401) {
-      throw new IntegrationError("Etsy rejected the access token (401). Reconnect Etsy from Settings → Integrations.", await safeText(res));
+      throw new IntegrationError("Etsy rejected the access token (401). Reconnect Etsy from Settings → Integrations.", await safeText(res), false, 401);
     }
-    if (!res.ok) throw new IntegrationError(`Etsy API error (HTTP ${res.status})`, await safeText(res));
+    if (!res.ok) {
+      throw new IntegrationError(`Etsy API error (HTTP ${res.status})`, await safeText(res), res.status === 429 || res.status >= 500, res.status);
+    }
     return (await res.json()) as T;
   }
 }

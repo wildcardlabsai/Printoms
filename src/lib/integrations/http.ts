@@ -9,6 +9,14 @@ export type RetryOptions = {
   maxDelayMs?: number;
   timeoutMs?: number;
   label?: string;
+  /**
+   * Is it safe to send this request again if we don't know whether it worked?
+   * Defaults to true for GET/HEAD. Non-idempotent writes (e.g. creating a
+   * fulfilment) are only retried on HTTP 429, where the server explicitly did
+   * not process them — never on timeouts, network errors or 5xx, which could
+   * create duplicates. Those surface as errors for a checked, manual retry.
+   */
+  idempotent?: boolean;
 };
 
 /**
@@ -18,11 +26,14 @@ export type RetryOptions = {
  */
 export async function fetchWithRetry(url: string, init: RequestInit = {}, opts: RetryOptions = {}): Promise<Response> {
   const { retries = 4, baseDelayMs = 800, maxDelayMs = 30_000, timeoutMs = 30_000, label = "request" } = opts;
+  const method = (init.method ?? "GET").toUpperCase();
+  const idempotent = opts.idempotent ?? (method === "GET" || method === "HEAD");
   let lastError: unknown;
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       const res = await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs), cache: "no-store" });
       if (res.status !== 429 && res.status < 500) return res;
+      if (!idempotent && res.status !== 429) return res; // 5xx on a write: don't resend blindly
       lastError = new IntegrationError(`${label} failed with HTTP ${res.status}`, await safeText(res), true);
       if (attempt === retries) return res;
       const retryAfter = Number(res.headers.get("retry-after"));
@@ -30,6 +41,7 @@ export async function fetchWithRetry(url: string, init: RequestInit = {}, opts: 
       await sleep(Math.min(delay, maxDelayMs));
     } catch (e) {
       lastError = e;
+      if (!idempotent) break; // the write may have reached the server — never resend blindly
       if (attempt === retries) break;
       await sleep(backoff(attempt, baseDelayMs, maxDelayMs));
     }

@@ -1,0 +1,39 @@
+# Calls PrintFlow's per-marketplace sync endpoints every 10 minutes.
+# Works with any Vercel plan (Hobby only allows daily Vercel crons).
+#
+# Setup (GitHub → Settings → Secrets and variables → Actions):
+#   Variable  PRINTFLOW_BASE_URL  e.g. https://printflow.example.com
+#   Secret    PRINTFLOW_CRON_SECRET  (same value as CRON_SECRET in the app)
+# The job does nothing until PRINTFLOW_BASE_URL is set.
+#
+# Note: GitHub may delay scheduled runs at busy times. For tighter timing use
+# Supabase pg_cron or Vercel Pro crons — see docs/scheduling.md.
+name: PrintFlow marketplace sync
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: printflow-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: ${{ vars.PRINTFLOW_BASE_URL != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    strategy:
+      fail-fast: false # one marketplace failing never stops the other
+      matrix:
+        provider: [etsy, shopify]
+    steps:
+      - name: Sync ${{ matrix.provider }}
+        env:
+          BASE_URL: ${{ vars.PRINTFLOW_BASE_URL }}
+          CRON_SECRET: ${{ secrets.PRINTFLOW_CRON_SECRET }}
+        run: |
+          curl --fail-with-body --silent --show-error --max-time 320 \
+            -H "Authorization: Bearer ${CRON_SECRET}" \
+            "${BASE_URL%/}/api/cron/sync/${{ matrix.provider }}"

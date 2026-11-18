@@ -115,24 +115,20 @@ export async function cancelOrderAction(orderId: string, reason: string): Promis
     if (["dispatched", "completed", "cancelled"].includes(order.status)) {
       return fail("This order can no longer be cancelled.");
     }
-    const { error } = await supabase.from("orders").update({ status: "cancelled" }).eq("id", id);
-    if (error) return fail(dbErrorMessage(error));
-    // Pull any queued work for this order off printers.
-    const { data: jobs } = await supabase.from("production_jobs").select("id").eq("order_id", id);
-    if (jobs?.length) {
-      await supabase.from("print_queue").update({ status: "removed" }).in("production_job_id", jobs.map((j) => j.id)).eq("status", "queued");
-    }
-    await supabase.rpc("log_activity", {
-      p_entity_type: "order",
-      p_entity_id: id,
+    // Same safe path as marketplace cancellations: unstarted work is closed,
+    // anything printing/printed/packed is kept and flagged for a decision.
+    const { data, error } = await supabase.rpc("apply_order_cancellation", {
       p_order_id: id,
-      p_action: "order.cancelled",
-      p_message: `Order cancelled in PrintFlow${reason.trim() ? `: ${reason.trim()}` : ""}${
-        order.source !== "manual" ? " (remember to cancel/refund on the marketplace too)" : ""
-      }`,
+      p_source: "printflow",
+      p_reason: `${reason.trim()}${order.source !== "manual" ? " (remember to cancel/refund on the marketplace too)" : ""}`,
     });
+    if (error) return fail(dbErrorMessage(error));
+    const r = data as { jobs_needing_decision?: number };
     revalidateOrder(id);
-    return ok(undefined, "Order cancelled");
+    return ok(
+      undefined,
+      r.jobs_needing_decision ? "Order cancelled — work already done needs a decision (see Marketplace & order changes)" : "Order cancelled",
+    );
   } catch (e) {
     return handle(e);
   }
@@ -143,18 +139,36 @@ export async function reopenOrderAction(orderId: string): Promise<ActionResult> 
     await authoriseAction("staff");
     const id = uuid.parse(orderId);
     const supabase = await createClient();
-    const { error } = await supabase.from("orders").update({ status: "new" }).eq("id", id).eq("status", "cancelled");
+    const { error } = await supabase.rpc("reopen_cancelled_order", { p_order_id: id });
     if (error) return fail(dbErrorMessage(error));
-    await supabase.rpc("refresh_order_status", { p_order_id: id });
-    await supabase.rpc("log_activity", {
-      p_entity_type: "order",
-      p_entity_id: id,
-      p_order_id: id,
-      p_action: "order.reopened",
-      p_message: "Cancelled order reopened",
-    });
     revalidateOrder(id);
     return ok(undefined, "Order reopened");
+  } catch (e) {
+    return handle(e);
+  }
+}
+
+const resolveSchema = z.object({
+  review_id: uuid,
+  resolution: z.enum(["acknowledged", "jobs_closed", "reprint_requested", "returned_to_production"]),
+  note: z.string().trim().max(1000).optional().nullable(),
+});
+
+/** A person decides what happens after a marketplace/order change. */
+export async function resolveOrderReviewAction(input: z.input<typeof resolveSchema>): Promise<ActionResult> {
+  try {
+    await authoriseAction("staff");
+    const v = resolveSchema.parse(input);
+    const supabase = await createClient();
+    const { data: review } = await supabase.from("order_reviews").select("order_id").eq("id", v.review_id).single();
+    const { error } = await supabase.rpc("resolve_order_review", {
+      p_review_id: v.review_id,
+      p_resolution: v.resolution,
+      p_note: v.note ?? undefined,
+    });
+    if (error) return fail(dbErrorMessage(error));
+    revalidateOrder(review?.order_id);
+    return ok(undefined, "Change resolved");
   } catch (e) {
     return handle(e);
   }

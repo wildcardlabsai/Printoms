@@ -1,7 +1,7 @@
 import "server-only";
 import type { AdminSupabase } from "@/lib/supabase/admin";
 import type { FetchContext, FulfilmentPush, MarketplaceAdapter, OrderPage } from "../types";
-import { IntegrationError } from "../types";
+import { findCarrier, normaliseTracking } from "../carriers";
 import { EtsyClient } from "./client";
 import { mapEtsyReceipt, type EtsyReceipt } from "./mapper";
 
@@ -44,14 +44,35 @@ export class EtsyAdapter implements MarketplaceAdapter {
     }
   }
 
+  /**
+   * Etsy createReceiptShipment: POST /shops/{shop_id}/receipts/{receipt_id}/tracking
+   * with tracking_code + carrier_name (form-encoded). Etsy marks the receipt as
+   * shipped and emails the buyer. The carrier name comes from the registry.
+   */
   async pushFulfilment(input: FulfilmentPush) {
-    if (!input.trackingNumber) throw new IntegrationError("A tracking number is required to update Etsy.");
-    const body = new URLSearchParams({ tracking_code: input.trackingNumber, carrier_name: input.carrier ?? "other", send_bcc: "true" });
-    await this.client.request(`/shops/${this.shopId}/receipts/${encodeURIComponent(input.externalOrderId)}/tracking`, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: body.toString(),
+    const body = new URLSearchParams({
+      tracking_code: normaliseTracking(input.trackingNumber),
+      carrier_name: findCarrier(input.carrier).etsy,
+      send_bcc: "true",
     });
-    return { externalId: null };
+    const response = await this.client.request<{ receipt_id?: number; shipments?: unknown[] }>(
+      `/shops/${this.shopId}/receipts/${encodeURIComponent(input.externalOrderId)}/tracking`,
+      { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: body.toString() },
+    );
+    return { externalId: null, response: trimResponse(response) };
   }
+
+  /** Is this tracking code already on the Etsy receipt? */
+  async findExistingFulfilment(input: FulfilmentPush) {
+    const receipt = await this.client.request<{ shipments?: { tracking_code?: string | null; receipt_shipping_id?: number }[] }>(
+      `/shops/${this.shopId}/receipts/${encodeURIComponent(input.externalOrderId)}`,
+    );
+    const wanted = normaliseTracking(input.trackingNumber);
+    const match = (receipt.shipments ?? []).find((s) => normaliseTracking(s.tracking_code) === wanted);
+    return match ? { externalId: match.receipt_shipping_id ? String(match.receipt_shipping_id) : null } : null;
+  }
+}
+
+function trimResponse(r: unknown) {
+  return JSON.parse(JSON.stringify(r ?? null).slice(0, 4000) || "null") as unknown;
 }

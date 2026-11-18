@@ -1,13 +1,15 @@
 "use client";
 
 import * as React from "react";
-import { CircleCheck, CircleX } from "lucide-react";
+import { CircleCheck, CircleX, CircleSlash } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Checkbox, Field, FormError, Input, Select, Textarea } from "@/components/ui/form";
 import { useToast } from "@/components/ui/toast";
 import { finishPrintAction } from "@/lib/actions/production";
 import { FAILURE_REASONS } from "@/lib/constants";
 import { cn, formatGrams } from "@/lib/utils";
+
+export type RunUnit = { id: string; unit_number: number; label?: string | null };
 
 export type FilamentOption = { id: string; brand: string | null; material: string | null; colour: string | null; remaining_g: number | null };
 
@@ -17,6 +19,7 @@ export function FinishPrintForm({
   estimatedGrams,
   filament,
   preferredMaterial,
+  runUnits = [],
   onDone,
 }: {
   runId: string;
@@ -24,10 +27,14 @@ export function FinishPrintForm({
   estimatedGrams?: number | null;
   filament: FilamentOption[];
   preferredMaterial?: string | null;
+  /** Units on this plate. With more than one, a partial outcome can be recorded. */
+  runUnits?: RunUnit[];
   onDone: () => void;
 }) {
   const toast = useToast();
-  const [outcome, setOutcome] = React.useState<"success" | "failure">(defaultOutcome);
+  const multi = runUnits.length > 1;
+  const [outcome, setOutcome] = React.useState<"success" | "failure" | "partial">(defaultOutcome);
+  const [failedUnits, setFailedUnits] = React.useState<string[]>([]);
   const [reason, setReason] = React.useState("");
   const [customReason, setCustomReason] = React.useState("");
   const [notes, setNotes] = React.useState("");
@@ -42,10 +49,15 @@ export function FinishPrintForm({
     startTransition(async () => {
       setError(null);
       const failureReason = reason === "__other" ? customReason : reason;
+      if (outcome === "partial" && (failedUnits.length === 0 || failedUnits.length === runUnits.length)) {
+        setError(failedUnits.length === 0 ? "Tick the units that failed." : "All units failed — choose “All failed” instead.");
+        return;
+      }
       const res = await finishPrintAction({
         run_id: runId,
-        succeeded: outcome === "success",
-        failure_reason: outcome === "failure" ? failureReason : null,
+        succeeded: outcome !== "failure",
+        failure_reason: outcome !== "success" ? failureReason : null,
+        failed_unit_ids: outcome === "partial" ? failedUnits : null,
         notes,
         requeue,
         filament_stock_id: stockId || null,
@@ -59,11 +71,12 @@ export function FinishPrintForm({
 
   return (
     <div className="space-y-4">
-      <div className="grid grid-cols-2 gap-2">
+      <div className={cn("grid gap-2", multi ? "grid-cols-3" : "grid-cols-2")}>
         {(
           [
-            ["success", "Print succeeded", CircleCheck, "border-brand-500 bg-brand-50 text-brand-800"],
-            ["failure", "Print failed", CircleX, "border-red-400 bg-red-50 text-red-800"],
+            ["success", multi ? "All succeeded" : "Print succeeded", CircleCheck, "border-brand-500 bg-brand-50 text-brand-800"],
+            ...(multi ? ([["partial", "Some failed", CircleSlash, "border-amber-400 bg-amber-50 text-amber-900"]] as const) : []),
+            ["failure", multi ? "All failed" : "Print failed", CircleX, "border-red-400 bg-red-50 text-red-800"],
           ] as const
         ).map(([value, label, Icon, activeCls]) => (
           <button
@@ -71,6 +84,7 @@ export function FinishPrintForm({
             type="button"
             onClick={() => {
               setOutcome(value);
+              setFailedUnits([]);
               if (value === "failure") {
                 setGrams("");
                 setStockId("");
@@ -90,7 +104,25 @@ export function FinishPrintForm({
         ))}
       </div>
 
-      {outcome === "failure" ? (
+      {outcome === "partial" ? (
+        <div className="rounded-xl border border-amber-200 bg-amber-50/50 p-3">
+          <p className="text-[13px] font-medium text-ink">Which units failed?</p>
+          <p className="mt-0.5 text-xs text-muted">The others are recorded as printed. Failed units are reprinted on the same job.</p>
+          <div className="mt-2 grid grid-cols-2 gap-1.5 sm:grid-cols-3">
+            {runUnits.map((u) => (
+              <label key={u.id} className="flex min-w-0 cursor-pointer items-center gap-2 rounded-lg bg-white px-2 py-1.5 text-sm ring-1 ring-line">
+                <Checkbox
+                  checked={failedUnits.includes(u.id)}
+                  onChange={(e) => setFailedUnits((list) => (e.target.checked ? [...list, u.id] : list.filter((x) => x !== u.id)))}
+                />
+                <span className="truncate">Unit {u.unit_number}{u.label ? ` · ${u.label}` : ""}</span>
+              </label>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      {outcome !== "success" ? (
         <div className="space-y-3 rounded-xl border border-red-100 bg-red-50/40 p-3">
           <Field label="What went wrong?" htmlFor="failure-reason" required>
             <Select id="failure-reason" value={reason} onChange={(e) => setReason(e.target.value)}>
@@ -147,8 +179,8 @@ export function FinishPrintForm({
         <Textarea id="run-notes" rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Optional observations" />
       </Field>
       <FormError message={error} />
-      <Button className="w-full" size="lg" variant={outcome === "failure" ? "danger" : "primary"} onClick={submit} loading={pending}>
-        {outcome === "success" ? "Record success" : "Record failure"}
+      <Button className="w-full" size="lg" variant={outcome === "success" ? "primary" : "danger"} onClick={submit} loading={pending}>
+        {outcome === "success" ? "Record success" : outcome === "partial" ? "Record partial result" : "Record failure"}
       </Button>
     </div>
   );

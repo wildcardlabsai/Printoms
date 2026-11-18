@@ -15,7 +15,8 @@
     "test:sync": "npm run test:integration",
     "test": "npm run test:unit && npm run test:integration",
     "test:unit": "node --conditions=react-server --import tsx --test \"tests/unit/**/*.test.ts\"",
-    "test:integration": "node --env-file=.env.local --conditions=react-server --import tsx --test --test-concurrency=1 \"tests/integration/**/*.test.ts\""
+    "test:integration": "node --env-file=.env.local --conditions=react-server --import tsx --test --test-concurrency=1 \"tests/integration/**/*.test.ts\"",
+    "test:e2e": "node --env-file=.env.local --conditions=react-server --import tsx tests/e2e/phase2-regression.ts"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

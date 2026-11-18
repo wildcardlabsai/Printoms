@@ -3,6 +3,7 @@ import type { FetchContext, FulfilmentPush, MarketplaceAdapter, OrderPage } from
 import { IntegrationError } from "../types";
 import { ShopifyClient } from "./client";
 import { mapShopifyOrder, type ShopifyOrderNode } from "./mapper";
+import { findCarrier, normaliseTracking } from "../carriers";
 import { ALL_RESTRICTED_FIELDS, classifyGraphQLErrors, restrictedFieldsFor, type GraphQLError } from "./protected-data";
 
 // Fields that never contain protected customer data.
@@ -16,8 +17,9 @@ const ORDER_CORE_FIELDS = `
         totalDiscountsSet { shopMoney { amount } }
         shippingLine { title }
         lineItems(first: 100) {
+          pageInfo { hasNextPage }
           nodes {
-            id title variantTitle quantity sku
+            id title variantTitle quantity currentQuantity sku
             originalUnitPriceSet { shopMoney { amount } }
             discountedTotalSet { shopMoney { amount } }
             customAttributes { key value }
@@ -51,6 +53,14 @@ const FULFILLMENT_ORDERS_QUERY = /* GraphQL */ `
   query PrintFlowFulfillmentOrders($id: ID!) {
     order(id: $id) {
       fulfillmentOrders(first: 20) { nodes { id status } }
+    }
+  }
+`;
+
+const EXISTING_FULFILMENTS_QUERY = /* GraphQL */ `
+  query PrintFlowExistingFulfilments($id: ID!) {
+    order(id: $id) {
+      fulfillments(first: 50) { id trackingInfo { number } }
     }
   }
 `;
@@ -148,30 +158,53 @@ export class ShopifyAdapter implements MarketplaceAdapter {
     });
   }
 
+  /**
+   * Shopify: find open fulfillment orders, then fulfillmentCreate with
+   * trackingInfo {number, company, url}. notifyCustomer sends Shopify's
+   * shipping confirmation email.
+   */
   async pushFulfilment(input: FulfilmentPush) {
     const fo = await this.client.graphql<{ order: { fulfillmentOrders: { nodes: { id: string; status: string }[] } } | null }>(
       FULFILLMENT_ORDERS_QUERY,
       { id: input.externalOrderId },
     );
     const open = fo.order?.fulfillmentOrders.nodes.filter((n) => ["OPEN", "IN_PROGRESS"].includes(n.status)) ?? [];
-    if (!open.length) throw new IntegrationError("Shopify has no open fulfilment orders for this order (it may already be fulfilled).");
+    if (!open.length) {
+      throw new IntegrationError("Shopify has no open fulfilment orders for this order (it may already be fulfilled).", fo, false, 422);
+    }
+    const number = normaliseTracking(input.trackingNumber);
     const result = await this.client.graphql<{
-      fulfillmentCreate: { fulfillment: { id: string } | null; userErrors: { message: string }[] };
+      fulfillmentCreate: { fulfillment: { id: string; status: string } | null; userErrors: { field: string[] | null; message: string }[] };
     }>(FULFILLMENT_CREATE, {
       fulfillment: {
         lineItemsByFulfillmentOrder: open.map((n) => ({ fulfillmentOrderId: n.id })),
         notifyCustomer: true,
         trackingInfo: {
-          number: input.trackingNumber ?? undefined,
-          company: input.carrier ?? undefined,
-          url: input.trackingUrl ?? undefined,
+          number,
+          company: findCarrier(input.carrier).shopify,
+          ...(input.trackingUrl ? { url: input.trackingUrl } : {}),
         },
       },
     });
     if (result.fulfillmentCreate.userErrors.length) {
-      throw new IntegrationError(`Shopify: ${result.fulfillmentCreate.userErrors.map((e) => e.message).join("; ")}`);
+      throw new IntegrationError(
+        `Shopify rejected the fulfilment: ${result.fulfillmentCreate.userErrors.map((e) => e.message).join("; ")}`,
+        result.fulfillmentCreate.userErrors,
+        false,
+        422,
+      );
     }
-    return { externalId: result.fulfillmentCreate.fulfillment?.id ?? null };
+    return { externalId: result.fulfillmentCreate.fulfillment?.id ?? null, response: result.fulfillmentCreate };
+  }
+
+  /** Is this tracking number already on one of the order's fulfilments? */
+  async findExistingFulfilment(input: FulfilmentPush) {
+    const data = await this.client.graphql<{
+      order: { fulfillments: { id: string; trackingInfo: { number: string | null }[] }[] } | null;
+    }>(EXISTING_FULFILMENTS_QUERY, { id: input.externalOrderId });
+    const wanted = normaliseTracking(input.trackingNumber);
+    const match = data.order?.fulfillments.find((f) => f.trackingInfo.some((t) => normaliseTracking(t.number) === wanted));
+    return match ? { externalId: match.id } : null;
   }
 }
 

@@ -10,6 +10,7 @@ import { businessSettingsSchema, integrationSettingsSchema, type BusinessSetting
 import { uuid } from "@/lib/validation/common";
 import { deleteCredentials, getIntegration } from "@/lib/integrations/credentials";
 import { pushShipmentToMarketplace } from "@/lib/integrations/fulfilment";
+import { retrySyncFailure } from "@/lib/integrations/failures";
 import { hasServiceRole } from "@/lib/server-env";
 import { maxImportDays } from "@/lib/integrations/import-window";
 
@@ -140,13 +141,70 @@ export async function updateProfileAction(fullName: string): Promise<ActionResul
 
 export async function pushShipmentAction(shipmentId: string): Promise<ActionResult> {
   try {
-    await authoriseAction("staff");
+    const user = await authoriseAction("staff");
     if (!hasServiceRole()) return fail("SUPABASE_SECRET_KEY is required for marketplace updates.");
-    await pushShipmentToMarketplace(uuid.parse(shipmentId));
+    const result = await pushShipmentToMarketplace(uuid.parse(shipmentId), user.id);
     revalidatePath("/fulfilment");
-    return ok(undefined, "Tracking sent to marketplace");
+    revalidatePath("/orders");
+    if (result.ok) return ok(undefined, result.message);
+    const hint: Record<string, string> = {
+      credentials: " Reconnect the marketplace in Settings → Integrations, then retry.",
+      rate_limited: " The marketplace is busy — retry in a few minutes.",
+      marketplace_error: " The marketplace had a problem — retry shortly.",
+      network: " The connection dropped — retrying is safe (PrintFlow checks before resubmitting).",
+      marketplace_rejected: " Check the tracking details and the order on the marketplace.",
+    };
+    return fail(`${result.message}${hint[result.category] ?? ""}`, undefined, result.category);
   } catch (e) {
     revalidatePath("/fulfilment");
+    return handle(e);
+  }
+}
+
+const failureNote = z.string().trim().max(500);
+
+/** Retry one failed marketplace order now, from its stored data. */
+export async function retrySyncFailureAction(failureId: string): Promise<ActionResult> {
+  try {
+    const user = await authoriseAction("admin");
+    if (!hasServiceRole()) return fail("SUPABASE_SECRET_KEY is required to retry imports.");
+    const result = await retrySyncFailure(uuid.parse(failureId), { id: user.id, label: user.fullName || user.email || "Team member" });
+    revalidatePath("/settings/integrations");
+    revalidatePath("/orders");
+    return result.ok ? ok(undefined, result.message) : fail(result.message);
+  } catch (e) {
+    return handle(e);
+  }
+}
+
+/** Stop retrying a failed order. A reason is required; it stays in the history. */
+export async function dismissSyncFailureAction(failureId: string, reason: string): Promise<ActionResult> {
+  try {
+    await authoriseAction("admin");
+    const r = failureNote.min(3, "Give a reason (at least 3 characters)").parse(reason);
+    const supabase = await createClient();
+    const { error } = await supabase.rpc("dismiss_sync_failure", { p_failure_id: uuid.parse(failureId), p_reason: r });
+    if (error) return fail(dbErrorMessage(error));
+    revalidatePath("/settings/integrations");
+    return ok(undefined, "Dismissed — it won’t be retried or shown as outstanding. You can reopen it at any time.");
+  } catch (e) {
+    return handle(e);
+  }
+}
+
+/** Put a dismissed failure back into the automatic retry queue. */
+export async function reopenSyncFailureAction(failureId: string, note?: string): Promise<ActionResult> {
+  try {
+    await authoriseAction("admin");
+    const supabase = await createClient();
+    const { error } = await supabase.rpc("reopen_sync_failure", {
+      p_failure_id: uuid.parse(failureId),
+      p_note: failureNote.parse(note ?? ""),
+    });
+    if (error) return fail(dbErrorMessage(error));
+    revalidatePath("/settings/integrations");
+    return ok(undefined, "Reopened — it will be retried on the next sync.");
+  } catch (e) {
     return handle(e);
   }
 }

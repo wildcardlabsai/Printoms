@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { CalendarClock, ChevronRight } from "lucide-react";
-import { SampleBadge } from "@/components/ui/badge";
+import { Badge, SampleBadge } from "@/components/ui/badge";
 import { OrderStatusBadge, PaymentBadge, PriorityBadge, SourceBadge } from "@/components/ui/status-badges";
 import { cn, externalRef, formatCurrency, formatDate, formatRelative, isOverdue } from "@/lib/utils";
 import type { OrderListRow } from "@/lib/data/orders";
@@ -58,6 +58,7 @@ export function OrdersTable({ rows }: { rows: OrderListRow[] }) {
                   <div className="flex items-center gap-1.5">
                     <OrderStatusBadge status={o.status} />
                     <PriorityBadge priority={o.priority} hideNormal />
+                    {o.requires_review ? <Badge tone="red" size="sm">Needs review</Badge> : null}
                   </div>
                 </td>
                 <td className="hidden px-3 py-3 xl:table-cell"><PaymentBadge status={o.payment_status} /></td>
@@ -88,6 +89,7 @@ export function OrdersTable({ rows }: { rows: OrderListRow[] }) {
                 <div className="flex flex-wrap items-center gap-1.5 text-xs">
                   <OrderStatusBadge status={o.status} />
                   <PriorityBadge priority={o.priority} hideNormal />
+                    {o.requires_review ? <Badge tone="red" size="sm">Needs review</Badge> : null}
                   <span className="ml-auto"><Deadline value={o.dispatch_by} status={o.status} /></span>
                 </div>
               </div>

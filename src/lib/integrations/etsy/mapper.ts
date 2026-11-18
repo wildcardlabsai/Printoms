@@ -121,6 +121,8 @@ export function mapEtsyReceipt(r: EtsyReceipt, defaultDispatchDays: number): Nor
       is_fulfilled: r.is_shipped,
       customer_data_status: "available",
       customer_data_restricted_fields: [],
+      // A receipt always carries every transaction.
+      items_complete: true,
     },
     items: r.transactions.map((t) => {
       const variations = t.variations ?? [];

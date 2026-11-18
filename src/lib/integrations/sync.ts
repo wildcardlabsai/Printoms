@@ -35,6 +35,12 @@ const OVERLAP_MS = 5 * 60_000;
 /** Stop pulling new pages after this long, leaving headroom for serverless limits. */
 const TIME_BUDGET_MS = 240_000;
 /**
+ * Per-marketplace lock. Slightly longer than a function's maximum duration
+ * (300s) so a run that is killed mid-way frees its marketplace well before the
+ * next 10-minute run, without ever allowing two runs to overlap.
+ */
+export const SYNC_LOCK_SECONDS = 330;
+/**
  * A failing order holds the cursor back (so it is re-fetched from the
  * marketplace) for this many attempts. After that it no longer blocks the
  * cursor — to avoid an ever-growing fetch window — but it stays recorded in
@@ -94,8 +100,25 @@ export async function runSync(
   provider: IntegrationProvider,
   trigger: SyncTrigger,
   triggeredBy: string | null = null,
-  admin: AdminSupabase = createAdminClient(),
+  admin?: AdminSupabase,
   options: SyncOptions = {},
+): Promise<SyncResult> {
+  // Never throw: one marketplace's problem must not stop another's sync.
+  try {
+    return await runSyncUnsafe(provider, trigger, triggeredBy, admin ?? createAdminClient(), options);
+  } catch (e) {
+    const err = describeError(e);
+    console.error(`[sync:${provider}] unexpected error`, e);
+    return { provider, status: "failed", message: `Unexpected error: ${err.message}` };
+  }
+}
+
+async function runSyncUnsafe(
+  provider: IntegrationProvider,
+  trigger: SyncTrigger,
+  triggeredBy: string | null,
+  admin: AdminSupabase,
+  options: SyncOptions,
 ): Promise<SyncResult> {
   const resync = options.mode === "resync";
   const integration = await getIntegration(admin, provider);
@@ -103,8 +126,21 @@ export async function runSync(
     return { provider, status: "skipped", message: `${LABEL[provider]} skipped: not connected` };
   }
 
-  const { data: locked } = await admin.rpc("acquire_sync_lock", { p_provider: provider, p_seconds: 600 });
+  const { data: locked } = await admin.rpc("acquire_sync_lock", { p_provider: provider, p_seconds: SYNC_LOCK_SECONDS });
   if (!locked) return { provider, status: "skipped", message: "A sync is already running for this marketplace." };
+
+  // We hold this marketplace's lock, so any run still marked "running" was
+  // interrupted (timeout/crash). Close it so the log stays truthful. Its
+  // imported orders are kept and the cursor never moved past unsafe work.
+  await admin
+    .from("sync_logs")
+    .update({
+      status: "failed",
+      finished_at: new Date().toISOString(),
+      error_message: "Run did not finish (timed out or was interrupted). Orders it imported are kept; this run continues from the last safe point.",
+    })
+    .eq("provider", provider)
+    .eq("status", "running");
 
   const started = Date.now();
   const warnings: SyncWarning[] = [];
@@ -152,8 +188,18 @@ export async function runSync(
     .select("external_order_id, attempts, payload")
     .eq("provider", provider)
     .is("resolved_at", null)
+    .is("dismissed_at", null)
     .order("last_failed_at", { ascending: true });
   const openFailures = new Map<string, OpenFailure>((openRows ?? []).map((r) => [r.external_order_id, r]));
+  // Dismissed failures are not retried, but if the order later imports
+  // successfully they are still marked resolved.
+  const { data: dismissedRows } = await admin
+    .from("sync_failures")
+    .select("external_order_id")
+    .eq("provider", provider)
+    .is("resolved_at", null)
+    .not("dismissed_at", "is", null);
+  const dismissedIds = new Set((dismissedRows ?? []).map((r) => r.external_order_id));
 
   /** Ingest one order; record or resolve its failure state. */
   const ingest = async (normalised: NormalisedOrder, force: boolean): Promise<{ ok: boolean; attempts: number }> => {
@@ -167,7 +213,7 @@ export async function runSync(
     });
     if (error) {
       counters.failed++;
-      const { data: attempts } = await admin.rpc("record_sync_failure", {
+      const { data: recorded } = await admin.rpc("record_sync_failure", {
         p_provider: provider,
         p_external_order_id: extId,
         p_marketplace_updated_at: normalised.order.marketplace_updated_at,
@@ -175,14 +221,16 @@ export async function runSync(
         p_error: error.message,
         p_sync_log_id: logId as string,
       });
-      const n = typeof attempts === "number" ? attempts : 1;
+      const rec = (recorded ?? {}) as { attempts?: number; dismissed?: boolean };
+      const n = rec.attempts ?? 1;
       if (failures.length < 50) failures.push({ external_order_id: extId, error: error.message, attempts: n });
-      return { ok: false, attempts: n };
+      // A dismissed failure never holds the cursor back again.
+      return { ok: false, attempts: rec.dismissed ? Number.MAX_SAFE_INTEGER : n };
     }
-    if (openFailures.has(extId)) {
+    if (openFailures.has(extId) || dismissedIds.has(extId)) {
       await admin.rpc("resolve_sync_failure", { p_provider: provider, p_external_order_id: extId, p_sync_log_id: logId as string });
-      openFailures.delete(extId);
-      counters.recovered++;
+      if (openFailures.delete(extId)) counters.recovered++;
+      dismissedIds.delete(extId);
     }
     const result = (data as { result: string }).result;
     if (result === "created") counters.created++;
@@ -373,7 +421,8 @@ async function countOutstanding(admin: AdminSupabase, provider: IntegrationProvi
     .from("sync_failures")
     .select("id", { count: "exact", head: true })
     .eq("provider", provider)
-    .is("resolved_at", null);
+    .is("resolved_at", null)
+    .is("dismissed_at", null);
   return count ?? 0;
 }
 
@@ -383,20 +432,48 @@ async function countParked(admin: AdminSupabase, provider: IntegrationProvider) 
     .select("id", { count: "exact", head: true })
     .eq("provider", provider)
     .is("resolved_at", null)
+    .is("dismissed_at", null)
     .gt("attempts", FAILURE_CURSOR_HOLD_ATTEMPTS);
   return count ?? 0;
 }
 
-/** Run every connected integration whose next scheduled sync is due. Used by cron. */
-export async function runDueSyncs(): Promise<SyncResult[]> {
-  const admin = createAdminClient();
-  const { data: integrations } = await admin
+/** Is this integration due for a scheduled sync? */
+async function isDue(admin: AdminSupabase, provider: IntegrationProvider) {
+  const { data: i } = await admin
     .from("integrations")
-    .select("provider, status, sync_enabled, next_sync_at")
-    .in("status", ["connected", "error"])
-    .eq("sync_enabled", true);
-  const due = (integrations ?? []).filter((i) => !i.next_sync_at || new Date(i.next_sync_at).getTime() <= Date.now() + 30_000);
-  const results: SyncResult[] = [];
-  for (const i of due) results.push(await runSync(i.provider, "scheduled", null, admin));
-  return results;
+    .select("status, sync_enabled, next_sync_at")
+    .eq("provider", provider)
+    .maybeSingle();
+  if (!i || !["connected", "error"].includes(i.status) || !i.sync_enabled) return false;
+  return !i.next_sync_at || new Date(i.next_sync_at).getTime() <= Date.now() + 30_000;
+}
+
+/**
+ * Scheduled sync for ONE marketplace (used by /api/cron/sync/[provider]).
+ * Each marketplace has its own endpoint, function invocation, time budget,
+ * lock, cursor and log, so they can never block or time out each other.
+ */
+export async function runScheduledSync(provider: IntegrationProvider): Promise<SyncResult> {
+  try {
+    const admin = createAdminClient();
+    if (!(await isDue(admin, provider))) {
+      return { provider, status: "skipped", message: `${NAME[provider]}: not connected, disabled or not due yet.` };
+    }
+    return await runSync(provider, "scheduled", null, admin);
+  } catch (e) {
+    return { provider, status: "failed", message: describeError(e).message };
+  }
+}
+
+/**
+ * Legacy combined endpoint (/api/cron/sync): runs each due marketplace
+ * IN PARALLEL and isolated, so one failing or slow marketplace can't stop or
+ * starve the other. Prefer the per-marketplace endpoints for scheduling.
+ */
+export async function runDueSyncs(): Promise<SyncResult[]> {
+  const providers: IntegrationProvider[] = ["etsy", "shopify"];
+  const settled = await Promise.allSettled(providers.map((p) => runScheduledSync(p)));
+  return settled.map((r, i) =>
+    r.status === "fulfilled" ? r.value : { provider: providers[i]!, status: "failed" as const, message: String(r.reason) },
+  );
 }

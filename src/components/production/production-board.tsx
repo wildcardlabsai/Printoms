@@ -17,6 +17,8 @@ import {
 } from "@dnd-kit/core";
 import { ArrowRightLeft, Search, SquareKanban } from "lucide-react";
 import { Input, Select } from "@/components/ui/form";
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogBody, DialogContent, DialogFooter } from "@/components/ui/dialog";
 import { EmptyState } from "@/components/ui/empty-state";
 import { useToast } from "@/components/ui/toast";
 import {
@@ -125,6 +127,7 @@ export function ProductionBoard({
   const [printerFilter, setPrinterFilter] = React.useState("");
   const [priorityFilter, setPriorityFilter] = React.useState("");
   const [mobileStage, setMobileStage] = React.useState<ProductionStage>("new_order");
+  const [confirmMove, setConfirmMove] = React.useState<{ jobId: string; to: ProductionStage; message: string } | null>(null);
 
   // Re-sync local (optimistic) state when the server sends fresh data.
   const [prevInitial, setPrevInitial] = React.useState(initialJobs);
@@ -159,14 +162,18 @@ export function ProductionBoard({
   }, [filtered]);
 
   const move = React.useCallback(
-    async (jobId: string, to: ProductionStage) => {
+    async (jobId: string, to: ProductionStage, force = false) => {
       const job = jobs.find((j) => j.id === jobId);
       if (!job || job.stage === to) return;
       const previous = jobs;
       setJobs((list) => list.map((j) => (j.id === jobId ? { ...j, stage: to } : j)));
-      const res = await moveJobAction(jobId, to);
+      const res = await moveJobAction(jobId, to, undefined, { force });
       if (!res.ok) {
         setJobs(previous);
+        if (res.code === "OUTSTANDING_UNITS") {
+          setConfirmMove({ jobId, to, message: res.error });
+          return;
+        }
         toast({ title: "Couldn’t move job", description: res.error, tone: "error" });
       } else {
         if (res.message) toast({ title: res.message });
@@ -288,6 +295,27 @@ export function ProductionBoard({
           </div>
         </>
       )}
+
+      <Dialog open={confirmMove !== null} onOpenChange={(o) => !o && setConfirmMove(null)}>
+        <DialogContent size="sm" title="Units not printed yet" description="Moving to Ready to Pack marks every unit of this job as complete.">
+          <DialogBody>
+            <p className="text-sm text-ink-2">{confirmMove?.message}</p>
+            <p className="text-xs text-muted">They will be recorded as “completed without a print run” so the print history stays accurate.</p>
+          </DialogBody>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConfirmMove(null)}>Keep in current stage</Button>
+            <Button
+              onClick={() => {
+                const c = confirmMove;
+                setConfirmMove(null);
+                if (c) void move(c.jobId, c.to, true);
+              }}
+            >
+              Mark complete
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <JobDetailSheet
         jobId={openJobId}

@@ -42,7 +42,14 @@ export function PrintRunsTable({ runs, showPrinter = true }: { runs: PrintRunRow
                   </p>
                 </td>
                 {showPrinter ? <td className="px-3 py-3 whitespace-nowrap text-ink-2">{r.printer?.name ?? "—"}</td> : null}
-                <td className="px-3 py-3"><PrintRunBadge status={r.status} /></td>
+                <td className="px-3 py-3">
+                  <PrintRunBadge status={r.status} />
+                  {r.quantity > 1 || (r.quantity_failed ?? 0) > 0 ? (
+                    <span className="mt-1 block text-xs text-muted tabular">
+                      {r.quantity_succeeded ?? "–"}/{r.quantity} ok{r.quantity_failed ? <span className="text-red-600"> · {r.quantity_failed} failed</span> : null}
+                    </span>
+                  ) : null}
+                </td>
                 <td className="px-3 py-3 whitespace-nowrap tabular text-ink-2">
                   {duration(r)}
                   {r.estimated_minutes ? <span className="block text-xs text-faint">est. {formatMinutes(r.estimated_minutes)}</span> : null}
@@ -65,6 +72,7 @@ export function PrintRunsTable({ runs, showPrinter = true }: { runs: PrintRunRow
               <PrintRunBadge status={r.status} />
             </div>
             <p className="text-xs text-muted">
+              {r.quantity > 1 || (r.quantity_failed ?? 0) > 0 ? `${r.quantity_succeeded ?? "–"}/${r.quantity} ok · ` : ""}
               {formatDateTime(r.started_at)} · {duration(r)}
               {showPrinter && r.printer ? ` · ${r.printer.name}` : ""} · attempt {r.attempt_number}
             </p>

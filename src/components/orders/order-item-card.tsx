@@ -49,7 +49,12 @@ export function OrderItemCard({
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-1">
             <div className="min-w-0">
-              <p className="font-medium text-ink [overflow-wrap:anywhere]">{item.title}</p>
+              <p className="font-medium text-ink [overflow-wrap:anywhere]">
+                <span className={item.marketplace_status === "removed" ? "line-through decoration-red-400" : undefined}>{item.title}</span>
+                {item.marketplace_status === "removed" ? (
+                  <span className="ml-2 rounded-md bg-red-50 px-1.5 py-0.5 text-[11px] font-semibold text-red-700 ring-1 ring-red-200">Removed on marketplace</span>
+                ) : null}
+              </p>
               <p className="mt-0.5 text-xs text-muted">
                 {[item.sku ? `SKU ${item.sku}` : null, item.variant_title].filter(Boolean).join(" · ") || "No SKU"}
               </p>
@@ -71,6 +76,9 @@ export function OrderItemCard({
             <div className="mt-3 rounded-lg border border-violet-200 bg-violet-50/60 px-3 py-2">
               <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-violet-700">
                 <Sparkles className="size-3" /> Personalisation
+                {item.personalisation_changed_at ? (
+                  <span className="rounded bg-red-100 px-1 py-px text-[10px] text-red-700 normal-case tracking-normal">changed by customer</span>
+                ) : null}
               </p>
               <p className="mt-1 text-sm whitespace-pre-wrap text-violet-950 [overflow-wrap:anywhere]">{item.personalisation}</p>
             </div>
@@ -90,6 +98,9 @@ export function OrderItemCard({
                 ) : null}
                 {job.estimated_print_minutes ? <span className="text-muted">≈ {formatMinutes(job.estimated_print_minutes)}</span> : null}
                 {job.failed_attempts ? <span className="font-medium text-red-600">{job.failed_attempts} failed print{job.failed_attempts === 1 ? "" : "s"}</span> : null}
+                {job.quantity > 1 ? <span className="text-muted tabular">{job.quantity_printed}/{job.quantity} printed</span> : null}
+                {job.quantity_surplus ? <span className="font-medium text-orange-700">{job.quantity_surplus} surplus</span> : null}
+                {job.cancelled_at ? <span className="font-medium text-slate-600">Job closed{job.cancellation_reason ? ` — ${job.cancellation_reason}` : ""}</span> : null}
               </>
             ) : (
               <span className="text-muted">No production job</span>

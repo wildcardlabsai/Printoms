@@ -187,6 +187,38 @@ isOneToOne: false
       referencedColumns: ["id"]
     }
                   ]
+                },"fulfilment_submissions": {
+                  Row: {
+                    "attempt": number,"created_at": string,"error_category": string | null,"error_message": string | null,"external_fulfilment_id": string | null,"finished_at": string | null,"http_status": number | null,"id": string,"order_id": string,"provider": Database["public"]['Enums']["integration_provider"],"request": Json | null,"response": Json | null,"retryable": boolean | null,"shipment_id": string,"started_at": string,"status": string,"submitted_by": string | null
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "attempt": number,"created_at"?: string,"error_category"?: string | null,"error_message"?: string | null,"external_fulfilment_id"?: string | null,"finished_at"?: string | null,"http_status"?: number | null,"id"?: string,"order_id": string,"provider": Database["public"]['Enums']["integration_provider"],"request"?: Json | null,"response"?: Json | null,"retryable"?: boolean | null,"shipment_id": string,"started_at"?: string,"status"?: string,"submitted_by"?: string | null
+                  }
+                  Update: {
+                    "attempt"?: number,"created_at"?: string,"error_category"?: string | null,"error_message"?: string | null,"external_fulfilment_id"?: string | null,"finished_at"?: string | null,"http_status"?: number | null,"id"?: string,"order_id"?: string,"provider"?: Database["public"]['Enums']["integration_provider"],"request"?: Json | null,"response"?: Json | null,"retryable"?: boolean | null,"shipment_id"?: string,"started_at"?: string,"status"?: string,"submitted_by"?: string | null
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "fulfilment_submissions_order_id_fkey"
+      columns: ["order_id"]
+isOneToOne: false
+      referencedRelation: "orders"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "fulfilment_submissions_shipment_id_fkey"
+      columns: ["shipment_id"]
+isOneToOne: false
+      referencedRelation: "shipments"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "fulfilment_submissions_submitted_by_fkey"
+      columns: ["submitted_by"]
+isOneToOne: false
+      referencedRelation: "profiles"
+      referencedColumns: ["id"]
+    }
+                  ]
                 },"integration_credentials": {
                   Row: {
                     "access_token_encrypted": string | null,"access_token_expires_at": string | null,"created_at": string,"id": string,"integration_id": string,"refresh_token_encrypted": string | null,"refresh_token_expires_at": string | null,"updated_at": string
@@ -249,14 +281,14 @@ isOneToOne: false
                   ]
                 },"order_items": {
                   Row: {
-                    "created_at": string,"external_line_item_id": string | null,"external_listing_id": string | null,"external_variant_id": string | null,"id": string,"internal_notes": string | null,"marketplace_options": Json | null,"order_id": string,"personalisation": string | null,"product_id": string | null,"quantity": number,"sku": string | null,"title": string,"total_price": number,"unit_price": number,"updated_at": string,"variant_details": NonNullable<Json>,"variant_title": string | null
+                    "created_at": string,"external_line_item_id": string | null,"external_listing_id": string | null,"external_variant_id": string | null,"id": string,"internal_notes": string | null,"marketplace_options": Json | null,"marketplace_status": string,"order_id": string,"personalisation": string | null,"personalisation_changed_at": string | null,"product_id": string | null,"quantity": number,"removed_at": string | null,"sku": string | null,"title": string,"total_price": number,"unit_price": number,"updated_at": string,"variant_details": NonNullable<Json>,"variant_title": string | null
                   }
                   ComputedFields: never
                   Insert: {
-                    "created_at"?: string,"external_line_item_id"?: string | null,"external_listing_id"?: string | null,"external_variant_id"?: string | null,"id"?: string,"internal_notes"?: string | null,"marketplace_options"?: Json | null,"order_id": string,"personalisation"?: string | null,"product_id"?: string | null,"quantity": number,"sku"?: string | null,"title": string,"total_price"?: number,"unit_price"?: number,"updated_at"?: string,"variant_details"?: NonNullable<Json>,"variant_title"?: string | null
+                    "created_at"?: string,"external_line_item_id"?: string | null,"external_listing_id"?: string | null,"external_variant_id"?: string | null,"id"?: string,"internal_notes"?: string | null,"marketplace_options"?: Json | null,"marketplace_status"?: string,"order_id": string,"personalisation"?: string | null,"personalisation_changed_at"?: string | null,"product_id"?: string | null,"quantity": number,"removed_at"?: string | null,"sku"?: string | null,"title": string,"total_price"?: number,"unit_price"?: number,"updated_at"?: string,"variant_details"?: NonNullable<Json>,"variant_title"?: string | null
                   }
                   Update: {
-                    "created_at"?: string,"external_line_item_id"?: string | null,"external_listing_id"?: string | null,"external_variant_id"?: string | null,"id"?: string,"internal_notes"?: string | null,"marketplace_options"?: Json | null,"order_id"?: string,"personalisation"?: string | null,"product_id"?: string | null,"quantity"?: number,"sku"?: string | null,"title"?: string,"total_price"?: number,"unit_price"?: number,"updated_at"?: string,"variant_details"?: NonNullable<Json>,"variant_title"?: string | null
+                    "created_at"?: string,"external_line_item_id"?: string | null,"external_listing_id"?: string | null,"external_variant_id"?: string | null,"id"?: string,"internal_notes"?: string | null,"marketplace_options"?: Json | null,"marketplace_status"?: string,"order_id"?: string,"personalisation"?: string | null,"personalisation_changed_at"?: string | null,"product_id"?: string | null,"quantity"?: number,"removed_at"?: string | null,"sku"?: string | null,"title"?: string,"total_price"?: number,"unit_price"?: number,"updated_at"?: string,"variant_details"?: NonNullable<Json>,"variant_title"?: string | null
                   }
                   Relationships: [
                     {
@@ -273,16 +305,54 @@ isOneToOne: false
       referencedColumns: ["id"]
     }
                   ]
-                },"orders": {
+                },"order_reviews": {
                   Row: {
-                    "carrier": string | null,"completed_at": string | null,"created_at": string,"created_by": string | null,"currency": string,"customer_data_restricted_fields": (string)[],"customer_data_status": string,"customer_email": string | null,"customer_id": string | null,"customer_name": string,"customer_note": string | null,"discount_total": number,"dispatch_by": string | null,"dispatched_at": string | null,"external_order_id": string | null,"external_order_number": string | null,"id": string,"is_sample": boolean,"last_synced_at": string | null,"marketplace_cancelled_at": string | null,"marketplace_dispatch_by": string | null,"marketplace_fulfilment_status": string | null,"marketplace_status": string | null,"marketplace_updated_at": string | null,"order_date": string,"order_number": string,"payment_status": Database["public"]['Enums']["payment_status"],"priority": Database["public"]['Enums']["priority_level"],"production_notes": string | null,"search_text": string | null,"shipping_address": NonNullable<Json>,"shipping_method": string | null,"shipping_total": number,"source": Database["public"]['Enums']["order_source"],"status": Database["public"]['Enums']["order_status"],"subtotal": number,"tax_total": number,"total": number,"tracking_number": string | null,"updated_at": string
+                    "created_at": string,"details": NonNullable<Json>,"detected_at": string,"fingerprint": string,"id": string,"kind": string,"message": string,"order_id": string,"order_item_id": string | null,"production_job_id": string | null,"resolution": string | null,"resolution_note": string | null,"resolved_at": string | null,"resolved_by": string | null,"severity": string,"source": string,"status": string,"title": string,"updated_at": string
                   }
                   ComputedFields: never
                   Insert: {
-                    "carrier"?: string | null,"completed_at"?: string | null,"created_at"?: string,"created_by"?: string | null,"currency"?: string,"customer_data_restricted_fields"?: (string)[],"customer_data_status"?: string,"customer_email"?: string | null,"customer_id"?: string | null,"customer_name": string,"customer_note"?: string | null,"discount_total"?: number,"dispatch_by"?: string | null,"dispatched_at"?: string | null,"external_order_id"?: string | null,"external_order_number"?: string | null,"id"?: string,"is_sample"?: boolean,"last_synced_at"?: string | null,"marketplace_cancelled_at"?: string | null,"marketplace_dispatch_by"?: string | null,"marketplace_fulfilment_status"?: string | null,"marketplace_status"?: string | null,"marketplace_updated_at"?: string | null,"order_date"?: string,"order_number"?: string,"payment_status"?: Database["public"]['Enums']["payment_status"],"priority"?: Database["public"]['Enums']["priority_level"],"production_notes"?: string | null,"search_text"?: never,"shipping_address"?: NonNullable<Json>,"shipping_method"?: string | null,"shipping_total"?: number,"source": Database["public"]['Enums']["order_source"],"status"?: Database["public"]['Enums']["order_status"],"subtotal"?: number,"tax_total"?: number,"total"?: number,"tracking_number"?: string | null,"updated_at"?: string
+                    "created_at"?: string,"details"?: NonNullable<Json>,"detected_at"?: string,"fingerprint": string,"id"?: string,"kind": string,"message": string,"order_id": string,"order_item_id"?: string | null,"production_job_id"?: string | null,"resolution"?: string | null,"resolution_note"?: string | null,"resolved_at"?: string | null,"resolved_by"?: string | null,"severity": string,"source"?: string,"status"?: string,"title": string,"updated_at"?: string
                   }
                   Update: {
-                    "carrier"?: string | null,"completed_at"?: string | null,"created_at"?: string,"created_by"?: string | null,"currency"?: string,"customer_data_restricted_fields"?: (string)[],"customer_data_status"?: string,"customer_email"?: string | null,"customer_id"?: string | null,"customer_name"?: string,"customer_note"?: string | null,"discount_total"?: number,"dispatch_by"?: string | null,"dispatched_at"?: string | null,"external_order_id"?: string | null,"external_order_number"?: string | null,"id"?: string,"is_sample"?: boolean,"last_synced_at"?: string | null,"marketplace_cancelled_at"?: string | null,"marketplace_dispatch_by"?: string | null,"marketplace_fulfilment_status"?: string | null,"marketplace_status"?: string | null,"marketplace_updated_at"?: string | null,"order_date"?: string,"order_number"?: string,"payment_status"?: Database["public"]['Enums']["payment_status"],"priority"?: Database["public"]['Enums']["priority_level"],"production_notes"?: string | null,"search_text"?: never,"shipping_address"?: NonNullable<Json>,"shipping_method"?: string | null,"shipping_total"?: number,"source"?: Database["public"]['Enums']["order_source"],"status"?: Database["public"]['Enums']["order_status"],"subtotal"?: number,"tax_total"?: number,"total"?: number,"tracking_number"?: string | null,"updated_at"?: string
+                    "created_at"?: string,"details"?: NonNullable<Json>,"detected_at"?: string,"fingerprint"?: string,"id"?: string,"kind"?: string,"message"?: string,"order_id"?: string,"order_item_id"?: string | null,"production_job_id"?: string | null,"resolution"?: string | null,"resolution_note"?: string | null,"resolved_at"?: string | null,"resolved_by"?: string | null,"severity"?: string,"source"?: string,"status"?: string,"title"?: string,"updated_at"?: string
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "order_reviews_order_id_fkey"
+      columns: ["order_id"]
+isOneToOne: false
+      referencedRelation: "orders"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "order_reviews_order_item_id_fkey"
+      columns: ["order_item_id"]
+isOneToOne: false
+      referencedRelation: "order_items"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "order_reviews_production_job_id_fkey"
+      columns: ["production_job_id"]
+isOneToOne: false
+      referencedRelation: "production_jobs"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "order_reviews_resolved_by_fkey"
+      columns: ["resolved_by"]
+isOneToOne: false
+      referencedRelation: "profiles"
+      referencedColumns: ["id"]
+    }
+                  ]
+                },"orders": {
+                  Row: {
+                    "carrier": string | null,"completed_at": string | null,"created_at": string,"created_by": string | null,"currency": string,"customer_data_restricted_fields": (string)[],"customer_data_status": string,"customer_email": string | null,"customer_id": string | null,"customer_name": string,"customer_note": string | null,"discount_total": number,"dispatch_by": string | null,"dispatched_at": string | null,"external_order_id": string | null,"external_order_number": string | null,"id": string,"is_sample": boolean,"last_synced_at": string | null,"marketplace_amended_at": string | null,"marketplace_cancelled_at": string | null,"marketplace_dispatch_by": string | null,"marketplace_fulfilment_status": string | null,"marketplace_status": string | null,"marketplace_updated_at": string | null,"order_date": string,"order_number": string,"payment_status": Database["public"]['Enums']["payment_status"],"priority": Database["public"]['Enums']["priority_level"],"production_notes": string | null,"requires_review": boolean,"search_text": string | null,"shipping_address": NonNullable<Json>,"shipping_method": string | null,"shipping_total": number,"source": Database["public"]['Enums']["order_source"],"status": Database["public"]['Enums']["order_status"],"subtotal": number,"tax_total": number,"total": number,"tracking_number": string | null,"updated_at": string
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "carrier"?: string | null,"completed_at"?: string | null,"created_at"?: string,"created_by"?: string | null,"currency"?: string,"customer_data_restricted_fields"?: (string)[],"customer_data_status"?: string,"customer_email"?: string | null,"customer_id"?: string | null,"customer_name": string,"customer_note"?: string | null,"discount_total"?: number,"dispatch_by"?: string | null,"dispatched_at"?: string | null,"external_order_id"?: string | null,"external_order_number"?: string | null,"id"?: string,"is_sample"?: boolean,"last_synced_at"?: string | null,"marketplace_amended_at"?: string | null,"marketplace_cancelled_at"?: string | null,"marketplace_dispatch_by"?: string | null,"marketplace_fulfilment_status"?: string | null,"marketplace_status"?: string | null,"marketplace_updated_at"?: string | null,"order_date"?: string,"order_number"?: string,"payment_status"?: Database["public"]['Enums']["payment_status"],"priority"?: Database["public"]['Enums']["priority_level"],"production_notes"?: string | null,"requires_review"?: boolean,"search_text"?: never,"shipping_address"?: NonNullable<Json>,"shipping_method"?: string | null,"shipping_total"?: number,"source": Database["public"]['Enums']["order_source"],"status"?: Database["public"]['Enums']["order_status"],"subtotal"?: number,"tax_total"?: number,"total"?: number,"tracking_number"?: string | null,"updated_at"?: string
+                  }
+                  Update: {
+                    "carrier"?: string | null,"completed_at"?: string | null,"created_at"?: string,"created_by"?: string | null,"currency"?: string,"customer_data_restricted_fields"?: (string)[],"customer_data_status"?: string,"customer_email"?: string | null,"customer_id"?: string | null,"customer_name"?: string,"customer_note"?: string | null,"discount_total"?: number,"dispatch_by"?: string | null,"dispatched_at"?: string | null,"external_order_id"?: string | null,"external_order_number"?: string | null,"id"?: string,"is_sample"?: boolean,"last_synced_at"?: string | null,"marketplace_amended_at"?: string | null,"marketplace_cancelled_at"?: string | null,"marketplace_dispatch_by"?: string | null,"marketplace_fulfilment_status"?: string | null,"marketplace_status"?: string | null,"marketplace_updated_at"?: string | null,"order_date"?: string,"order_number"?: string,"payment_status"?: Database["public"]['Enums']["payment_status"],"priority"?: Database["public"]['Enums']["priority_level"],"production_notes"?: string | null,"requires_review"?: boolean,"search_text"?: never,"shipping_address"?: NonNullable<Json>,"shipping_method"?: string | null,"shipping_total"?: number,"source"?: Database["public"]['Enums']["order_source"],"status"?: Database["public"]['Enums']["order_status"],"subtotal"?: number,"tax_total"?: number,"total"?: number,"tracking_number"?: string | null,"updated_at"?: string
                   }
                   Relationships: [
                     {
@@ -331,16 +401,42 @@ isOneToOne: false
       referencedColumns: ["id"]
     }
                   ]
-                },"print_runs": {
+                },"print_run_units": {
                   Row: {
-                    "attempt_number": number,"created_at": string,"ended_at": string | null,"ended_by": string | null,"estimated_minutes": number | null,"failure_reason": string | null,"filament_recorded": boolean,"id": string,"notes": string | null,"printer_id": string | null,"production_job_id": string,"quantity": number,"started_at": string,"started_by": string | null,"status": Database["public"]['Enums']["print_run_status"],"updated_at": string
+                    "created_at": string,"outcome": string,"print_run_id": string,"unit_id": string
                   }
                   ComputedFields: never
                   Insert: {
-                    "attempt_number"?: number,"created_at"?: string,"ended_at"?: string | null,"ended_by"?: string | null,"estimated_minutes"?: number | null,"failure_reason"?: string | null,"filament_recorded"?: boolean,"id"?: string,"notes"?: string | null,"printer_id"?: string | null,"production_job_id": string,"quantity"?: number,"started_at"?: string,"started_by"?: string | null,"status"?: Database["public"]['Enums']["print_run_status"],"updated_at"?: string
+                    "created_at"?: string,"outcome"?: string,"print_run_id": string,"unit_id": string
                   }
                   Update: {
-                    "attempt_number"?: number,"created_at"?: string,"ended_at"?: string | null,"ended_by"?: string | null,"estimated_minutes"?: number | null,"failure_reason"?: string | null,"filament_recorded"?: boolean,"id"?: string,"notes"?: string | null,"printer_id"?: string | null,"production_job_id"?: string,"quantity"?: number,"started_at"?: string,"started_by"?: string | null,"status"?: Database["public"]['Enums']["print_run_status"],"updated_at"?: string
+                    "created_at"?: string,"outcome"?: string,"print_run_id"?: string,"unit_id"?: string
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "print_run_units_print_run_id_fkey"
+      columns: ["print_run_id"]
+isOneToOne: false
+      referencedRelation: "print_runs"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "print_run_units_unit_id_fkey"
+      columns: ["unit_id"]
+isOneToOne: false
+      referencedRelation: "production_units"
+      referencedColumns: ["id"]
+    }
+                  ]
+                },"print_runs": {
+                  Row: {
+                    "attempt_number": number,"created_at": string,"ended_at": string | null,"ended_by": string | null,"estimated_minutes": number | null,"failure_reason": string | null,"filament_recorded": boolean,"id": string,"notes": string | null,"printer_id": string | null,"production_job_id": string,"quantity": number,"quantity_failed": number | null,"quantity_succeeded": number | null,"started_at": string,"started_by": string | null,"status": Database["public"]['Enums']["print_run_status"],"updated_at": string
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "attempt_number"?: number,"created_at"?: string,"ended_at"?: string | null,"ended_by"?: string | null,"estimated_minutes"?: number | null,"failure_reason"?: string | null,"filament_recorded"?: boolean,"id"?: string,"notes"?: string | null,"printer_id"?: string | null,"production_job_id": string,"quantity"?: number,"quantity_failed"?: number | null,"quantity_succeeded"?: number | null,"started_at"?: string,"started_by"?: string | null,"status"?: Database["public"]['Enums']["print_run_status"],"updated_at"?: string
+                  }
+                  Update: {
+                    "attempt_number"?: number,"created_at"?: string,"ended_at"?: string | null,"ended_by"?: string | null,"estimated_minutes"?: number | null,"failure_reason"?: string | null,"filament_recorded"?: boolean,"id"?: string,"notes"?: string | null,"printer_id"?: string | null,"production_job_id"?: string,"quantity"?: number,"quantity_failed"?: number | null,"quantity_succeeded"?: number | null,"started_at"?: string,"started_by"?: string | null,"status"?: Database["public"]['Enums']["print_run_status"],"updated_at"?: string
                   }
                   Relationships: [
                     {
@@ -417,14 +513,14 @@ isOneToOne: false
                   ]
                 },"production_jobs": {
                   Row: {
-                    "attempt_count": number,"board_position": number,"colour": string | null,"completed_at": string | null,"created_at": string,"due_date": string | null,"estimated_filament_g": number | null,"estimated_print_minutes": number | null,"failed_attempts": number,"id": string,"is_sample": boolean,"job_number": string,"material": string | null,"notes": string | null,"order_id": string,"order_item_id": string,"print_requirements": string | null,"printer_id": string | null,"priority": Database["public"]['Enums']["priority_level"],"product_id": string | null,"quantity": number,"stage": Database["public"]['Enums']["production_stage"],"stage_before_hold": Database["public"]['Enums']["production_stage"] | null,"stage_changed_at": string,"started_at": string | null,"updated_at": string
+                    "attempt_count": number,"board_position": number,"cancellation_reason": string | null,"cancelled_at": string | null,"colour": string | null,"completed_at": string | null,"created_at": string,"due_date": string | null,"estimated_filament_g": number | null,"estimated_print_minutes": number | null,"failed_attempts": number,"id": string,"is_sample": boolean,"job_number": string,"material": string | null,"notes": string | null,"order_id": string,"order_item_id": string,"print_requirements": string | null,"printer_id": string | null,"priority": Database["public"]['Enums']["priority_level"],"product_id": string | null,"quantity": number,"quantity_passed": number,"quantity_pending": number,"quantity_printed": number,"quantity_printing": number,"quantity_surplus": number,"stage": Database["public"]['Enums']["production_stage"],"stage_before_hold": Database["public"]['Enums']["production_stage"] | null,"stage_changed_at": string,"started_at": string | null,"units_failed": number,"updated_at": string,"job_has_physical_work": boolean | null
                   }
-                  ComputedFields: never
+                  ComputedFields: "job_has_physical_work"
                   Insert: {
-                    "attempt_count"?: number,"board_position"?: number,"colour"?: string | null,"completed_at"?: string | null,"created_at"?: string,"due_date"?: string | null,"estimated_filament_g"?: number | null,"estimated_print_minutes"?: number | null,"failed_attempts"?: number,"id"?: string,"is_sample"?: boolean,"job_number"?: string,"material"?: string | null,"notes"?: string | null,"order_id": string,"order_item_id": string,"print_requirements"?: string | null,"printer_id"?: string | null,"priority"?: Database["public"]['Enums']["priority_level"],"product_id"?: string | null,"quantity": number,"stage"?: Database["public"]['Enums']["production_stage"],"stage_before_hold"?: Database["public"]['Enums']["production_stage"] | null,"stage_changed_at"?: string,"started_at"?: string | null,"updated_at"?: string
+                    "attempt_count"?: number,"board_position"?: number,"cancellation_reason"?: string | null,"cancelled_at"?: string | null,"colour"?: string | null,"completed_at"?: string | null,"created_at"?: string,"due_date"?: string | null,"estimated_filament_g"?: number | null,"estimated_print_minutes"?: number | null,"failed_attempts"?: number,"id"?: string,"is_sample"?: boolean,"job_number"?: string,"material"?: string | null,"notes"?: string | null,"order_id": string,"order_item_id": string,"print_requirements"?: string | null,"printer_id"?: string | null,"priority"?: Database["public"]['Enums']["priority_level"],"product_id"?: string | null,"quantity": number,"quantity_passed"?: number,"quantity_pending"?: number,"quantity_printed"?: number,"quantity_printing"?: number,"quantity_surplus"?: number,"stage"?: Database["public"]['Enums']["production_stage"],"stage_before_hold"?: Database["public"]['Enums']["production_stage"] | null,"stage_changed_at"?: string,"started_at"?: string | null,"units_failed"?: number,"updated_at"?: string
                   }
                   Update: {
-                    "attempt_count"?: number,"board_position"?: number,"colour"?: string | null,"completed_at"?: string | null,"created_at"?: string,"due_date"?: string | null,"estimated_filament_g"?: number | null,"estimated_print_minutes"?: number | null,"failed_attempts"?: number,"id"?: string,"is_sample"?: boolean,"job_number"?: string,"material"?: string | null,"notes"?: string | null,"order_id"?: string,"order_item_id"?: string,"print_requirements"?: string | null,"printer_id"?: string | null,"priority"?: Database["public"]['Enums']["priority_level"],"product_id"?: string | null,"quantity"?: number,"stage"?: Database["public"]['Enums']["production_stage"],"stage_before_hold"?: Database["public"]['Enums']["production_stage"] | null,"stage_changed_at"?: string,"started_at"?: string | null,"updated_at"?: string
+                    "attempt_count"?: number,"board_position"?: number,"cancellation_reason"?: string | null,"cancelled_at"?: string | null,"colour"?: string | null,"completed_at"?: string | null,"created_at"?: string,"due_date"?: string | null,"estimated_filament_g"?: number | null,"estimated_print_minutes"?: number | null,"failed_attempts"?: number,"id"?: string,"is_sample"?: boolean,"job_number"?: string,"material"?: string | null,"notes"?: string | null,"order_id"?: string,"order_item_id"?: string,"print_requirements"?: string | null,"printer_id"?: string | null,"priority"?: Database["public"]['Enums']["priority_level"],"product_id"?: string | null,"quantity"?: number,"quantity_passed"?: number,"quantity_pending"?: number,"quantity_printed"?: number,"quantity_printing"?: number,"quantity_surplus"?: number,"stage"?: Database["public"]['Enums']["production_stage"],"stage_before_hold"?: Database["public"]['Enums']["production_stage"] | null,"stage_changed_at"?: string,"started_at"?: string | null,"units_failed"?: number,"updated_at"?: string
                   }
                   Relationships: [
                     {
@@ -450,6 +546,32 @@ isOneToOne: false
       columns: ["product_id"]
 isOneToOne: false
       referencedRelation: "products"
+      referencedColumns: ["id"]
+    }
+                  ]
+                },"production_units": {
+                  Row: {
+                    "completed_without_print": boolean,"created_at": string,"failed_attempts": number,"id": string,"last_print_run_id": string | null,"passed_at": string | null,"printed_at": string | null,"printed_personalisation": string | null,"printed_variant": string | null,"production_job_id": string,"status": Database["public"]['Enums']["unit_status"],"status_reason": string | null,"unit_number": number,"updated_at": string
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "completed_without_print"?: boolean,"created_at"?: string,"failed_attempts"?: number,"id"?: string,"last_print_run_id"?: string | null,"passed_at"?: string | null,"printed_at"?: string | null,"printed_personalisation"?: string | null,"printed_variant"?: string | null,"production_job_id": string,"status"?: Database["public"]['Enums']["unit_status"],"status_reason"?: string | null,"unit_number": number,"updated_at"?: string
+                  }
+                  Update: {
+                    "completed_without_print"?: boolean,"created_at"?: string,"failed_attempts"?: number,"id"?: string,"last_print_run_id"?: string | null,"passed_at"?: string | null,"printed_at"?: string | null,"printed_personalisation"?: string | null,"printed_variant"?: string | null,"production_job_id"?: string,"status"?: Database["public"]['Enums']["unit_status"],"status_reason"?: string | null,"unit_number"?: number,"updated_at"?: string
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "production_units_last_print_run_id_fkey"
+      columns: ["last_print_run_id"]
+isOneToOne: false
+      referencedRelation: "print_runs"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "production_units_production_job_id_fkey"
+      columns: ["production_job_id"]
+isOneToOne: false
+      referencedRelation: "production_jobs"
       referencedColumns: ["id"]
     }
                   ]
@@ -489,14 +611,14 @@ isOneToOne: false
                   ]
                 },"shipments": {
                   Row: {
-                    "carrier": string | null,"checklist": NonNullable<Json>,"created_at": string,"dispatched_at": string | null,"dispatched_by": string | null,"external_fulfilment_id": string | null,"id": string,"marketplace_push_error": string | null,"marketplace_push_status": Database["public"]['Enums']["marketplace_push_status"],"marketplace_pushed_at": string | null,"order_id": string,"packaging_notes": string | null,"packed_at": string | null,"packed_by": string | null,"shipping_cost": number | null,"shipping_method": string | null,"status": Database["public"]['Enums']["shipment_status"],"tracking_number": string | null,"tracking_url": string | null,"updated_at": string
+                    "carrier": string | null,"checklist": NonNullable<Json>,"created_at": string,"dispatched_at": string | null,"dispatched_by": string | null,"external_fulfilment_id": string | null,"id": string,"marketplace_push_attempts": number,"marketplace_push_error": string | null,"marketplace_push_error_category": string | null,"marketplace_push_last_attempt_at": string | null,"marketplace_push_status": Database["public"]['Enums']["marketplace_push_status"],"marketplace_pushed_at": string | null,"order_id": string,"packaging_notes": string | null,"packed_at": string | null,"packed_by": string | null,"shipping_cost": number | null,"shipping_method": string | null,"status": Database["public"]['Enums']["shipment_status"],"tracking_number": string | null,"tracking_url": string | null,"updated_at": string
                   }
                   ComputedFields: never
                   Insert: {
-                    "carrier"?: string | null,"checklist"?: NonNullable<Json>,"created_at"?: string,"dispatched_at"?: string | null,"dispatched_by"?: string | null,"external_fulfilment_id"?: string | null,"id"?: string,"marketplace_push_error"?: string | null,"marketplace_push_status"?: Database["public"]['Enums']["marketplace_push_status"],"marketplace_pushed_at"?: string | null,"order_id": string,"packaging_notes"?: string | null,"packed_at"?: string | null,"packed_by"?: string | null,"shipping_cost"?: number | null,"shipping_method"?: string | null,"status"?: Database["public"]['Enums']["shipment_status"],"tracking_number"?: string | null,"tracking_url"?: string | null,"updated_at"?: string
+                    "carrier"?: string | null,"checklist"?: NonNullable<Json>,"created_at"?: string,"dispatched_at"?: string | null,"dispatched_by"?: string | null,"external_fulfilment_id"?: string | null,"id"?: string,"marketplace_push_attempts"?: number,"marketplace_push_error"?: string | null,"marketplace_push_error_category"?: string | null,"marketplace_push_last_attempt_at"?: string | null,"marketplace_push_status"?: Database["public"]['Enums']["marketplace_push_status"],"marketplace_pushed_at"?: string | null,"order_id": string,"packaging_notes"?: string | null,"packed_at"?: string | null,"packed_by"?: string | null,"shipping_cost"?: number | null,"shipping_method"?: string | null,"status"?: Database["public"]['Enums']["shipment_status"],"tracking_number"?: string | null,"tracking_url"?: string | null,"updated_at"?: string
                   }
                   Update: {
-                    "carrier"?: string | null,"checklist"?: NonNullable<Json>,"created_at"?: string,"dispatched_at"?: string | null,"dispatched_by"?: string | null,"external_fulfilment_id"?: string | null,"id"?: string,"marketplace_push_error"?: string | null,"marketplace_push_status"?: Database["public"]['Enums']["marketplace_push_status"],"marketplace_pushed_at"?: string | null,"order_id"?: string,"packaging_notes"?: string | null,"packed_at"?: string | null,"packed_by"?: string | null,"shipping_cost"?: number | null,"shipping_method"?: string | null,"status"?: Database["public"]['Enums']["shipment_status"],"tracking_number"?: string | null,"tracking_url"?: string | null,"updated_at"?: string
+                    "carrier"?: string | null,"checklist"?: NonNullable<Json>,"created_at"?: string,"dispatched_at"?: string | null,"dispatched_by"?: string | null,"external_fulfilment_id"?: string | null,"id"?: string,"marketplace_push_attempts"?: number,"marketplace_push_error"?: string | null,"marketplace_push_error_category"?: string | null,"marketplace_push_last_attempt_at"?: string | null,"marketplace_push_status"?: Database["public"]['Enums']["marketplace_push_status"],"marketplace_pushed_at"?: string | null,"order_id"?: string,"packaging_notes"?: string | null,"packed_at"?: string | null,"packed_by"?: string | null,"shipping_cost"?: number | null,"shipping_method"?: string | null,"status"?: Database["public"]['Enums']["shipment_status"],"tracking_number"?: string | null,"tracking_url"?: string | null,"updated_at"?: string
                   }
                   Relationships: [
                     {
@@ -519,19 +641,57 @@ isOneToOne: false
       referencedColumns: ["id"]
     }
                   ]
-                },"sync_failures": {
+                },"sync_failure_events": {
                   Row: {
-                    "attempts": number,"created_at": string,"external_order_id": string,"first_failed_at": string,"id": string,"integration_id": string | null,"last_error": string,"last_failed_at": string,"last_sync_log_id": string | null,"marketplace_updated_at": string | null,"payload": NonNullable<Json>,"provider": Database["public"]['Enums']["integration_provider"],"resolved_at": string | null,"resolved_sync_log_id": string | null,"updated_at": string
+                    "actor_id": string | null,"actor_label": string | null,"created_at": string,"error": string | null,"event": string,"failure_id": string,"id": string,"note": string | null,"sync_log_id": string | null
                   }
                   ComputedFields: never
                   Insert: {
-                    "attempts"?: number,"created_at"?: string,"external_order_id": string,"first_failed_at"?: string,"id"?: string,"integration_id"?: string | null,"last_error": string,"last_failed_at"?: string,"last_sync_log_id"?: string | null,"marketplace_updated_at"?: string | null,"payload": NonNullable<Json>,"provider": Database["public"]['Enums']["integration_provider"],"resolved_at"?: string | null,"resolved_sync_log_id"?: string | null,"updated_at"?: string
+                    "actor_id"?: string | null,"actor_label"?: string | null,"created_at"?: string,"error"?: string | null,"event": string,"failure_id": string,"id"?: string,"note"?: string | null,"sync_log_id"?: string | null
                   }
                   Update: {
-                    "attempts"?: number,"created_at"?: string,"external_order_id"?: string,"first_failed_at"?: string,"id"?: string,"integration_id"?: string | null,"last_error"?: string,"last_failed_at"?: string,"last_sync_log_id"?: string | null,"marketplace_updated_at"?: string | null,"payload"?: NonNullable<Json>,"provider"?: Database["public"]['Enums']["integration_provider"],"resolved_at"?: string | null,"resolved_sync_log_id"?: string | null,"updated_at"?: string
+                    "actor_id"?: string | null,"actor_label"?: string | null,"created_at"?: string,"error"?: string | null,"event"?: string,"failure_id"?: string,"id"?: string,"note"?: string | null,"sync_log_id"?: string | null
                   }
                   Relationships: [
                     {
+      foreignKeyName: "sync_failure_events_actor_id_fkey"
+      columns: ["actor_id"]
+isOneToOne: false
+      referencedRelation: "profiles"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "sync_failure_events_failure_id_fkey"
+      columns: ["failure_id"]
+isOneToOne: false
+      referencedRelation: "sync_failures"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "sync_failure_events_sync_log_id_fkey"
+      columns: ["sync_log_id"]
+isOneToOne: false
+      referencedRelation: "sync_logs"
+      referencedColumns: ["id"]
+    }
+                  ]
+                },"sync_failures": {
+                  Row: {
+                    "attempts": number,"created_at": string,"dismiss_reason": string | null,"dismissed_at": string | null,"dismissed_by": string | null,"external_order_id": string,"first_failed_at": string,"id": string,"integration_id": string | null,"last_error": string,"last_failed_at": string,"last_sync_log_id": string | null,"marketplace_updated_at": string | null,"payload": NonNullable<Json>,"provider": Database["public"]['Enums']["integration_provider"],"reopened_at": string | null,"reopened_by": string | null,"resolved_at": string | null,"resolved_sync_log_id": string | null,"updated_at": string
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "attempts"?: number,"created_at"?: string,"dismiss_reason"?: string | null,"dismissed_at"?: string | null,"dismissed_by"?: string | null,"external_order_id": string,"first_failed_at"?: string,"id"?: string,"integration_id"?: string | null,"last_error": string,"last_failed_at"?: string,"last_sync_log_id"?: string | null,"marketplace_updated_at"?: string | null,"payload": NonNullable<Json>,"provider": Database["public"]['Enums']["integration_provider"],"reopened_at"?: string | null,"reopened_by"?: string | null,"resolved_at"?: string | null,"resolved_sync_log_id"?: string | null,"updated_at"?: string
+                  }
+                  Update: {
+                    "attempts"?: number,"created_at"?: string,"dismiss_reason"?: string | null,"dismissed_at"?: string | null,"dismissed_by"?: string | null,"external_order_id"?: string,"first_failed_at"?: string,"id"?: string,"integration_id"?: string | null,"last_error"?: string,"last_failed_at"?: string,"last_sync_log_id"?: string | null,"marketplace_updated_at"?: string | null,"payload"?: NonNullable<Json>,"provider"?: Database["public"]['Enums']["integration_provider"],"reopened_at"?: string | null,"reopened_by"?: string | null,"resolved_at"?: string | null,"resolved_sync_log_id"?: string | null,"updated_at"?: string
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "sync_failures_dismissed_by_fkey"
+      columns: ["dismissed_by"]
+isOneToOne: false
+      referencedRelation: "profiles"
+      referencedColumns: ["id"]
+    },{
       foreignKeyName: "sync_failures_integration_id_fkey"
       columns: ["integration_id"]
 isOneToOne: false
@@ -542,6 +702,12 @@ isOneToOne: false
       columns: ["last_sync_log_id"]
 isOneToOne: false
       referencedRelation: "sync_logs"
+      referencedColumns: ["id"]
+    },{
+      foreignKeyName: "sync_failures_reopened_by_fkey"
+      columns: ["reopened_by"]
+isOneToOne: false
+      referencedRelation: "profiles"
       referencedColumns: ["id"]
     },{
       foreignKeyName: "sync_failures_resolved_sync_log_id_fkey"
@@ -614,14 +780,26 @@ isOneToOne: false
 "analytics_report":
 { Args: { "p_from": string,"p_to": string }; Returns: Json
                            },
+"apply_order_cancellation":
+{ Args: { "p_actor_label"?: string,"p_order_id": string,"p_reason"?: string,"p_source": string }; Returns: Json
+                           },
 "assert_can_write":
 { Args: Record<PropertyKey, never>; Returns: undefined
+                           },
+"assert_order_shippable":
+{ Args: { "p_order_id": string }; Returns: undefined
                            },
 "assign_job_to_printer":
 { Args: { "p_job_id": string,"p_printer_id": string }; Returns: undefined
                            },
+"begin_fulfilment_submission":
+{ Args: { "p_provider": Database["public"]['Enums']["integration_provider"],"p_request": Json,"p_shipment_id": string,"p_user": string }; Returns: Json
+                           },
 "can_write":
 { Args: Record<PropertyKey, never>; Returns: boolean
+                           },
+"close_unstarted_job":
+{ Args: { "p_job_id": string,"p_reason": string }; Returns: undefined
                            },
 "create_manual_order":
 { Args: { "p_items": Json,"p_order": Json }; Returns: string
@@ -632,8 +810,14 @@ isOneToOne: false
 "dashboard_metrics":
 { Args: Record<PropertyKey, never>; Returns: Json
                            },
+"dismiss_sync_failure":
+{ Args: { "p_failure_id": string,"p_reason": string }; Returns: undefined
+                           },
+"finish_fulfilment_submission":
+{ Args: { "p_error_category"?: string,"p_error_message"?: string,"p_external_id"?: string,"p_http_status"?: number,"p_response"?: Json,"p_retryable"?: boolean,"p_status": string,"p_submission_id": string }; Returns: undefined
+                           },
 "finish_print_run":
-{ Args: { "p_failure_reason"?: string,"p_notes"?: string,"p_requeue"?: boolean,"p_run_id": string,"p_succeeded": boolean }; Returns: undefined
+{ Args: { "p_failed_count"?: number,"p_failed_unit_ids"?: (string)[],"p_failure_reason"?: string,"p_notes"?: string,"p_requeue"?: boolean,"p_run_id": string,"p_succeeded": boolean }; Returns: undefined
                            },
 "ingest_marketplace_order":
 { Args: { "p_actor_label"?: string,"p_force"?: boolean,"p_items": Json,"p_order": Json,"p_source": Database["public"]['Enums']["order_source"] }; Returns: Json
@@ -643,6 +827,12 @@ isOneToOne: false
                            },
 "is_team_member":
 { Args: Record<PropertyKey, never>; Returns: boolean
+                           },
+"job_has_physical_work":
+{ Args: { "p_job": Omit<Database["public"]['Tables']["production_jobs"]['Row'], Database["public"]['Tables']["production_jobs"]['ComputedFields']> }; Returns: boolean
+                           },
+"job_outstanding_units":
+{ Args: { "p_job_id": string }; Returns: number
                            },
 "log_activity":
 { Args: { "p_action": string,"p_actor_label"?: string,"p_entity_id": string,"p_entity_type": string,"p_message": string,"p_metadata"?: Json,"p_order_id": string }; Returns: undefined
@@ -665,14 +855,32 @@ isOneToOne: false
 "purge_sample_data":
 { Args: Record<PropertyKey, never>; Returns: Json
                            },
+"raise_order_review":
+{ Args: { "p_actor_label"?: string,"p_details": Json,"p_fingerprint": string,"p_item_id": string,"p_job_id": string,"p_kind": string,"p_message": string,"p_order_id": string,"p_severity": string,"p_source"?: string,"p_title": string }; Returns: boolean
+                           },
+"record_qc_failure":
+{ Args: { "p_count"?: number,"p_job_id": string,"p_reason": string,"p_unit_ids"?: (string)[] }; Returns: number
+                           },
 "record_sync_failure":
-{ Args: { "p_error": string,"p_external_order_id": string,"p_marketplace_updated_at": string,"p_payload": Json,"p_provider": Database["public"]['Enums']["integration_provider"],"p_sync_log_id": string }; Returns: number
+{ Args: { "p_actor_id"?: string,"p_actor_label"?: string,"p_error": string,"p_external_order_id": string,"p_marketplace_updated_at": string,"p_payload": Json,"p_provider": Database["public"]['Enums']["integration_provider"],"p_sync_log_id": string }; Returns: Json
+                           },
+"refresh_job_unit_counts":
+{ Args: { "p_job_id": string }; Returns: undefined
                            },
 "refresh_order_status":
 { Args: { "p_order_id": string }; Returns: undefined
                            },
+"reopen_cancelled_order":
+{ Args: { "p_order_id": string }; Returns: undefined
+                           },
+"reopen_sync_failure":
+{ Args: { "p_failure_id": string,"p_note"?: string }; Returns: undefined
+                           },
+"resolve_order_review":
+{ Args: { "p_note"?: string,"p_resolution": string,"p_review_id": string }; Returns: Json
+                           },
 "resolve_sync_failure":
-{ Args: { "p_external_order_id": string,"p_provider": Database["public"]['Enums']["integration_provider"],"p_sync_log_id": string }; Returns: boolean
+{ Args: { "p_actor_id"?: string,"p_actor_label"?: string,"p_external_order_id": string,"p_provider": Database["public"]['Enums']["integration_provider"],"p_sync_log_id": string }; Returns: boolean
                            },
 "set_order_hold":
 { Args: { "p_hold": boolean,"p_order_id": string,"p_reason"?: string }; Returns: undefined
@@ -690,11 +898,14 @@ isOneToOne: false
 { Args: { "p": Database["public"]['Enums']["production_stage"] }; Returns: string
                            },
 "start_print_run":
-{ Args: { "p_job_id": string,"p_printer_id": string,"p_quantity"?: number }; Returns: string
+{ Args: { "p_job_id": string,"p_printer_id": string,"p_quantity"?: number,"p_unit_ids"?: (string)[] }; Returns: string
+                           },
+"sync_job_units":
+{ Args: { "p_job_id": string,"p_reason"?: string }; Returns: Json
                            }
           }
           Enums: {
-            "filament_usage_kind": "print"|"failed_print"|"adjustment"|"waste","integration_provider": "etsy"|"shopify","integration_status": "not_connected"|"connected"|"error"|"disabled","marketplace_push_status": "not_required"|"pending"|"sent"|"failed","order_source": "etsy"|"shopify"|"manual","order_status": "new"|"in_production"|"ready_to_pack"|"packed"|"dispatched"|"completed"|"on_hold"|"cancelled","payment_status": "pending"|"paid"|"partially_paid"|"partially_refunded"|"refunded"|"voided"|"unknown","print_run_status": "printing"|"succeeded"|"failed"|"cancelled","printer_status": "available"|"printing"|"paused"|"maintenance"|"offline","priority_level": "low"|"normal"|"high"|"urgent","production_stage": "new_order"|"awaiting_preparation"|"ready_to_print"|"printing"|"quality_check"|"ready_to_pack"|"dispatched"|"completed"|"on_hold","queue_status": "queued"|"active"|"done"|"removed","shipment_status": "pending"|"packed"|"dispatched"|"delivered"|"returned"|"cancelled","sync_status": "running"|"success"|"partial"|"failed","sync_trigger": "scheduled"|"manual"|"initial"|"webhook"|"resync","user_role": "owner"|"admin"|"staff"|"viewer"
+            "filament_usage_kind": "print"|"failed_print"|"adjustment"|"waste","integration_provider": "etsy"|"shopify","integration_status": "not_connected"|"connected"|"error"|"disabled","marketplace_push_status": "not_required"|"pending"|"sent"|"failed","order_source": "etsy"|"shopify"|"manual","order_status": "new"|"in_production"|"ready_to_pack"|"packed"|"dispatched"|"completed"|"on_hold"|"cancelled","payment_status": "pending"|"paid"|"partially_paid"|"partially_refunded"|"refunded"|"voided"|"unknown","print_run_status": "printing"|"succeeded"|"failed"|"cancelled","printer_status": "available"|"printing"|"paused"|"maintenance"|"offline","priority_level": "low"|"normal"|"high"|"urgent","production_stage": "new_order"|"awaiting_preparation"|"ready_to_print"|"printing"|"quality_check"|"ready_to_pack"|"dispatched"|"completed"|"on_hold","queue_status": "queued"|"active"|"done"|"removed","shipment_status": "pending"|"packed"|"dispatched"|"delivered"|"returned"|"cancelled","sync_status": "running"|"success"|"partial"|"failed","sync_trigger": "scheduled"|"manual"|"initial"|"webhook"|"resync","unit_status": "pending"|"printing"|"printed"|"passed"|"cancelled"|"surplus","user_role": "owner"|"admin"|"staff"|"viewer"
           }
           CompositeTypes: {
             [_ in never]: never
@@ -814,7 +1025,7 @@ export const Constants = {
           }
         },"public": {
           Enums: {
-            "filament_usage_kind": ["print", "failed_print", "adjustment", "waste"],"integration_provider": ["etsy", "shopify"],"integration_status": ["not_connected", "connected", "error", "disabled"],"marketplace_push_status": ["not_required", "pending", "sent", "failed"],"order_source": ["etsy", "shopify", "manual"],"order_status": ["new", "in_production", "ready_to_pack", "packed", "dispatched", "completed", "on_hold", "cancelled"],"payment_status": ["pending", "paid", "partially_paid", "partially_refunded", "refunded", "voided", "unknown"],"print_run_status": ["printing", "succeeded", "failed", "cancelled"],"printer_status": ["available", "printing", "paused", "maintenance", "offline"],"priority_level": ["low", "normal", "high", "urgent"],"production_stage": ["new_order", "awaiting_preparation", "ready_to_print", "printing", "quality_check", "ready_to_pack", "dispatched", "completed", "on_hold"],"queue_status": ["queued", "active", "done", "removed"],"shipment_status": ["pending", "packed", "dispatched", "delivered", "returned", "cancelled"],"sync_status": ["running", "success", "partial", "failed"],"sync_trigger": ["scheduled", "manual", "initial", "webhook", "resync"],"user_role": ["owner", "admin", "staff", "viewer"]
+            "filament_usage_kind": ["print", "failed_print", "adjustment", "waste"],"integration_provider": ["etsy", "shopify"],"integration_status": ["not_connected", "connected", "error", "disabled"],"marketplace_push_status": ["not_required", "pending", "sent", "failed"],"order_source": ["etsy", "shopify", "manual"],"order_status": ["new", "in_production", "ready_to_pack", "packed", "dispatched", "completed", "on_hold", "cancelled"],"payment_status": ["pending", "paid", "partially_paid", "partially_refunded", "refunded", "voided", "unknown"],"print_run_status": ["printing", "succeeded", "failed", "cancelled"],"printer_status": ["available", "printing", "paused", "maintenance", "offline"],"priority_level": ["low", "normal", "high", "urgent"],"production_stage": ["new_order", "awaiting_preparation", "ready_to_print", "printing", "quality_check", "ready_to_pack", "dispatched", "completed", "on_hold"],"queue_status": ["queued", "active", "done", "removed"],"shipment_status": ["pending", "packed", "dispatched", "delivered", "returned", "cancelled"],"sync_status": ["running", "success", "partial", "failed"],"sync_trigger": ["scheduled", "manual", "initial", "webhook", "resync"],"unit_status": ["pending", "printing", "printed", "passed", "cancelled", "surplus"],"user_role": ["owner", "admin", "staff", "viewer"]
           }
         }
 } as const

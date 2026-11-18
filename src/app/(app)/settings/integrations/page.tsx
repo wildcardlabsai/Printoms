@@ -49,7 +49,7 @@ export default async function IntegrationsPage({ searchParams }: { searchParams:
 
       {overview.failures.length ? (
         <div className="mt-5">
-          <SyncFailuresPanel failures={overview.failures} holdAttempts={FAILURE_CURSOR_HOLD_ATTEMPTS} />
+          <SyncFailuresPanel failures={overview.failures} holdAttempts={FAILURE_CURSOR_HOLD_ATTEMPTS} canManage={canManage} />
         </div>
       ) : null}
 
@@ -74,8 +74,10 @@ export default async function IntegrationsPage({ searchParams }: { searchParams:
                 <p className="flex items-center gap-2 font-medium text-amber-700"><CircleAlert className="size-4" /> CRON_SECRET not set — scheduled sync is disabled</p>
               )}
               <p>
-                <code className="rounded bg-subtle px-1 text-xs">vercel.json</code> calls <code className="rounded bg-subtle px-1 text-xs">/api/cron/sync</code> every 10 minutes.
-                Each marketplace syncs when its own interval is due. Vercel Hobby plans only allow daily cron jobs — use Pro, or any external scheduler (see README).
+                Each marketplace has its own endpoint — <code className="rounded bg-subtle px-1 text-xs">/api/cron/sync/etsy</code> and{" "}
+                <code className="rounded bg-subtle px-1 text-xs">/api/cron/sync/shopify</code> — so one failing never blocks the other. Call them every
+                5–10 minutes from Supabase pg_cron, GitHub Actions or Vercel Pro cron (see <code className="rounded bg-subtle px-1 text-xs">docs/scheduling.md</code>);
+                each only syncs when its own interval is due.
               </p>
             </CardContent>
           </Card>

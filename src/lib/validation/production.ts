@@ -34,9 +34,11 @@ export const finishPrintSchema = z
     requeue: z.boolean().default(true),
     filament_stock_id: z.string().optional().nullable().transform((v) => (v ? v : null)),
     filament_grams: optionalNumber({ max: 50000 }),
+    /** Units on the plate that failed (partial plate). Empty/omitted = all succeeded (or all failed if succeeded=false). */
+    failed_unit_ids: z.array(uuid).max(500).optional().nullable(),
   })
   .superRefine((v, ctx) => {
-    if (!v.succeeded && !v.failure_reason) {
+    if ((!v.succeeded || (v.failed_unit_ids?.length ?? 0) > 0) && !v.failure_reason) {
       ctx.addIssue({ code: "custom", path: ["failure_reason"], message: "Describe why the print failed" });
     }
     if (v.filament_stock_id && !v.filament_grams) {

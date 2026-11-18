@@ -12,6 +12,7 @@ import { NotesPanel } from "@/components/orders/notes-panel";
 import { OrderActions } from "@/components/orders/order-actions";
 import { OrderInternalForm } from "@/components/orders/order-internal-form";
 import { OrderItemCard } from "@/components/orders/order-item-card";
+import { OrderReviewsPanel } from "@/components/orders/order-reviews-panel";
 import { getIntegrationShopDomain, getNotes, getOrder, getOrderActivity, getProductOptions } from "@/lib/data/orders";
 import { hasRole, requireUser } from "@/lib/auth";
 import { addressLines, externalRef, formatCurrency, formatDate, formatDateTime, formatRelative, isOverdue } from "@/lib/utils";
@@ -118,6 +119,22 @@ export default async function OrderDetailPage({ params }: { params: Promise<{ id
 
       <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_380px]">
         <div className="min-w-0 space-y-5">
+          {order.order_reviews.length ? (
+            <Card className={order.requires_review ? "border-red-200" : undefined}>
+              <CardHeader
+                icon={<ShieldAlert />}
+                title="Marketplace & order changes"
+                description={
+                  order.requires_review
+                    ? "Changes after production started need a decision. Packing and dispatch are blocked until resolved."
+                    : "Changes applied to this order after it was imported."
+                }
+              />
+              <CardContent>
+                <OrderReviewsPanel reviews={order.order_reviews} canWrite={canWrite} />
+              </CardContent>
+            </Card>
+          ) : null}
           <Card>
             <CardHeader
               icon={<Package />}

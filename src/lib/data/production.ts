@@ -3,7 +3,8 @@ import { createClient } from "@/lib/supabase/server";
 
 export const BOARD_JOB_SELECT = `id, job_number, stage, priority, quantity, printer_id, estimated_print_minutes, material, colour,
   estimated_filament_g, due_date, attempt_count, failed_attempts, board_position, stage_changed_at, notes, is_sample,
-  order:orders!inner(id, order_number, customer_name, source, dispatch_by, status, is_sample),
+  quantity_printed, quantity_passed, quantity_pending, quantity_printing, quantity_surplus, units_failed, cancelled_at,
+  order:orders!inner(id, order_number, customer_name, source, dispatch_by, status, is_sample, requires_review),
   item:order_items!inner(id, title, variant_title, personalisation),
   product:products(id, name, sku),
   printer:printers!production_jobs_printer_id_fkey(id, name)`;
@@ -16,7 +17,10 @@ export async function getBoardJobs({ includeClosed = false }: { includeClosed?: 
     const since = new Date(Date.now() - 7 * 24 * 3600_000).toISOString();
     query = query.or(`stage.not.in.(dispatched,completed),stage_changed_at.gte.${since}`);
   }
-  query = query.neq("order.status", "cancelled");
+  // Jobs closed because of a cancellation/removal are hidden. Jobs of a
+  // cancelled order that still hold physical work stay visible (flagged) until
+  // someone decides what happens to them — nothing silently disappears.
+  query = query.is("cancelled_at", null);
   const { data, error } = await query.limit(1000);
   if (error) throw new Error(error.message);
   return data ?? [];
@@ -38,7 +42,7 @@ export type PrinterOption = Awaited<ReturnType<typeof getActivePrinters>>[number
 
 export async function getJobDetail(jobId: string) {
   const supabase = await createClient();
-  const [job, runs, activity, filament] = await Promise.all([
+  const [job, runs, activity, filament, units] = await Promise.all([
     supabase
       .from("production_jobs")
       .select(
@@ -51,7 +55,7 @@ export async function getJobDetail(jobId: string) {
       .maybeSingle(),
     supabase
       .from("print_runs")
-      .select("id, status, attempt_number, started_at, ended_at, failure_reason, notes, estimated_minutes, filament_recorded, quantity, printer:printers!print_runs_printer_id_fkey(id, name)")
+      .select("id, status, attempt_number, started_at, ended_at, failure_reason, notes, estimated_minutes, filament_recorded, quantity, quantity_succeeded, quantity_failed, printer:printers!print_runs_printer_id_fkey(id, name), print_run_units(unit_id, outcome, unit:production_units(unit_number))")
       .eq("production_job_id", jobId)
       .order("started_at", { ascending: false }),
     supabase
@@ -67,6 +71,11 @@ export async function getJobDetail(jobId: string) {
       .eq("is_archived", false)
       .gt("remaining_g", 0)
       .order("material"),
+    supabase
+      .from("production_units")
+      .select("id, unit_number, status, failed_attempts, printed_personalisation, printed_variant, printed_at, passed_at, completed_without_print, status_reason, last_print_run_id")
+      .eq("production_job_id", jobId)
+      .order("unit_number"),
   ]);
   if (job.error) throw new Error(job.error.message);
   if (!job.data) return null;
@@ -81,6 +90,7 @@ export async function getJobDetail(jobId: string) {
     activity: activity.data ?? [],
     filament: (filament.data ?? []).filter((f): f is typeof f & { id: string } => Boolean(f.id)),
     usage: usage.data ?? [],
+    units: units.data ?? [],
   };
 }
 

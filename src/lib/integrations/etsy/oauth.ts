@@ -29,7 +29,8 @@ async function tokenRequest(body: Record<string, string>): Promise<EtsyTokenResp
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams(body).toString(),
     },
-    { label: "Etsy token request", retries: 2 },
+    // Refresh tokens rotate: a blind resend could invalidate the new token.
+    { label: "Etsy token request", retries: 2, idempotent: false },
   );
   if (!res.ok) {
     throw new IntegrationError(`Etsy rejected the token request (HTTP ${res.status})`, await safeText(res));

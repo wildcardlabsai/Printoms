@@ -32,11 +32,14 @@ export type ShopifyOrderNode = {
   totalDiscountsSet: Money;
   shippingLine: { title: string | null } | null;
   lineItems: {
+    pageInfo?: { hasNextPage: boolean } | null;
     nodes: {
       id: string;
       title: string;
       variantTitle: string | null;
       quantity: number;
+      /** Quantity after order edits/removals. 0 = removed from the order. */
+      currentQuantity?: number | null;
       sku: string | null;
       originalUnitPriceSet: Money;
       discountedTotalSet: Money;
@@ -120,12 +123,15 @@ export function mapShopifyOrder(o: ShopifyOrderNode, defaultDispatchDays: number
       is_fulfilled: o.displayFulfillmentStatus === "FULFILLED",
       customer_data_status: restricted.size ? "restricted" : "available",
       customer_data_restricted_fields: [...restricted].sort(),
+      // Only claim completeness when Shopify confirmed there are no more lines.
+      items_complete: o.lineItems.pageInfo ? !o.lineItems.pageInfo.hasNextPage : false,
     },
     items: o.lineItems.nodes.map((li) => {
       // Keys starting with "_" are hidden app data by Shopify convention.
       const attrs = li.customAttributes.filter((c) => c.value && !c.key.startsWith("_"));
       const { personalisation, variations: rest } = splitOptions(attrs.map((c) => ({ name: c.key, value: c.value ?? "" })));
       const unit = amount(li.originalUnitPriceSet);
+      const qty = li.currentQuantity ?? li.quantity;
       return {
         external_line_item_id: li.id,
         external_listing_id: li.product?.id ?? null,
@@ -134,9 +140,9 @@ export function mapShopifyOrder(o: ShopifyOrderNode, defaultDispatchDays: number
         title: li.title,
         variant_title: li.variantTitle && li.variantTitle !== "Default Title" ? li.variantTitle : null,
         variant_details: rest,
-        quantity: li.quantity,
+        quantity: qty,
         unit_price: unit,
-        total_price: amount(li.discountedTotalSet) || unit * li.quantity,
+        total_price: qty === 0 ? 0 : amount(li.discountedTotalSet) || unit * qty,
         personalisation,
         // Original data, untouched.
         marketplace_options: { variant_title: li.variantTitle, custom_attributes: li.customAttributes },

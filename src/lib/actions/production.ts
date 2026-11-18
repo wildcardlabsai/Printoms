@@ -40,7 +40,12 @@ export async function getJobDetailAction(jobId: string): Promise<ActionResult<Jo
  * Move a job on the board. Moves that represent real-world events go through
  * the proper workflow (print runs, dispatch) rather than silently changing state.
  */
-export async function moveJobAction(jobId: string, toStageInput: string, position?: number): Promise<ActionResult> {
+export async function moveJobAction(
+  jobId: string,
+  toStageInput: string,
+  position?: number,
+  options: { force?: boolean } = {},
+): Promise<ActionResult> {
   try {
     await authoriseAction("staff");
     const id = uuid.parse(jobId);
@@ -48,12 +53,14 @@ export async function moveJobAction(jobId: string, toStageInput: string, positio
     const supabase = await createClient();
     const { data: job } = await supabase
       .from("production_jobs")
-      .select("id, stage, printer_id, order_id, order:orders(status)")
+      .select("id, stage, printer_id, order_id, quantity, quantity_pending, quantity_printing, cancelled_at, order:orders(status)")
       .eq("id", id)
       .single();
     if (!job) return fail("Job not found");
 
-    if (job.order?.status === "cancelled") return fail("This order has been cancelled.");
+    if (job.order?.status === "cancelled" || job.cancelled_at) {
+      return fail("This order or item has been cancelled. Use the review actions on the order to decide what happens to it.");
+    }
     if (job.stage === toStage) {
       if (position != null) await supabase.from("production_jobs").update({ board_position: position }).eq("id", id);
       revalidatePath("/production");
@@ -78,11 +85,17 @@ export async function moveJobAction(jobId: string, toStageInput: string, positio
         if (toStage === "quality_check" || toStage === "ready_to_pack") {
           const { error } = await supabase.rpc("finish_print_run", { p_run_id: run.id, p_succeeded: true });
           if (error) return fail(dbErrorMessage(error));
-          if (toStage === "ready_to_pack") {
+          const { data: after } = await supabase.from("production_jobs").select("stage, quantity_pending, quantity").eq("id", id).single();
+          if (toStage === "ready_to_pack" && after?.stage === "quality_check") {
             await supabase.from("production_jobs").update({ stage: "ready_to_pack" }).eq("id", id);
           }
           revalidateProduction(job.order_id);
-          return ok(undefined, "Print completed");
+          return ok(
+            undefined,
+            after && after.quantity_pending > 0
+              ? `Print completed — ${after.quantity_pending} of ${after.quantity} units still to print`
+              : "Print completed",
+          );
         }
         return fail("Open the job and record the print as completed or failed first.");
       }
@@ -94,6 +107,16 @@ export async function moveJobAction(jobId: string, toStageInput: string, positio
       if (error) return fail(dbErrorMessage(error));
       revalidateProduction(job.order_id);
       return ok(undefined, "Print started");
+    }
+
+    // Moving to Ready to Pack with units never printed needs an explicit decision.
+    const outstanding = (job.quantity_pending ?? 0) + (job.quantity_printing ?? 0);
+    if (toStage === "ready_to_pack" && outstanding > 0 && !options.force) {
+      return fail(
+        `${outstanding} of ${job.quantity} unit${job.quantity === 1 ? " has" : "s have"} not been printed yet. Mark ${outstanding === 1 ? "it" : "them"} as complete anyway (e.g. supplied from stock)?`,
+        undefined,
+        "OUTSTANDING_UNITS",
+      );
     }
 
     const update: { stage: typeof toStage; board_position?: number } = { stage: toStage };
@@ -145,11 +168,16 @@ export async function assignPrinterAction(jobId: string, printerId: string | nul
   }
 }
 
-export async function startPrintAction(jobId: string, printerId: string): Promise<ActionResult> {
+export async function startPrintAction(jobId: string, printerId: string, quantity?: number | null): Promise<ActionResult> {
   try {
     await authoriseAction("staff");
     const supabase = await createClient();
-    const { error } = await supabase.rpc("start_print_run", { p_job_id: uuid.parse(jobId), p_printer_id: uuid.parse(printerId) });
+    const qty = quantity == null ? undefined : z.number().int().min(1).max(10000).parse(quantity);
+    const { error } = await supabase.rpc("start_print_run", {
+      p_job_id: uuid.parse(jobId),
+      p_printer_id: uuid.parse(printerId),
+      ...(qty ? { p_quantity: qty } : {}),
+    });
     if (error) return fail(dbErrorMessage(error));
     revalidateProduction();
     return ok(undefined, "Print started");
@@ -176,8 +204,11 @@ export async function finishPrintAction(input: z.input<typeof finishPrintSchema>
       p_failure_reason: v.failure_reason ?? undefined,
       p_notes: v.notes ?? undefined,
       p_requeue: v.requeue,
+      ...(v.failed_unit_ids?.length ? { p_failed_unit_ids: v.failed_unit_ids } : {}),
     });
     if (error) return fail(dbErrorMessage(error));
+    const { data: runAfter } = await supabase.from("print_runs").select("quantity_succeeded, quantity_failed").eq("id", v.run_id).single();
+    const { data: jobAfter } = await supabase.from("production_jobs").select("stage, quantity_pending").eq("id", run.production_job_id).single();
 
     // Filament is only deducted when the person confirms actual consumption.
     if (v.filament_stock_id && v.filament_grams) {
@@ -186,13 +217,22 @@ export async function finishPrintAction(input: z.input<typeof finishPrintSchema>
         grams: v.filament_grams,
         print_run_id: v.run_id,
         production_job_id: run.production_job_id,
-        kind: v.succeeded ? "print" : "failed_print",
+        kind: (runAfter?.quantity_succeeded ?? (v.succeeded ? 1 : 0)) > 0 ? "print" : "failed_print",
       });
       if (usageError) return fail(`Print recorded, but filament usage failed: ${dbErrorMessage(usageError)}`);
     }
     revalidateProduction();
     revalidatePath("/filament");
-    return ok(undefined, v.succeeded ? "Print completed — job moved to Quality Check" : "Failure recorded — job returned to Ready to Print");
+    const failedUnits = runAfter?.quantity_failed ?? 0;
+    const remaining = jobAfter?.quantity_pending ?? 0;
+    return ok(
+      undefined,
+      remaining === 0
+        ? "Print recorded — job moved to Quality Check"
+        : failedUnits > 0
+          ? `${failedUnits} unit${failedUnits === 1 ? "" : "s"} failed — ${remaining} to reprint (same job, no duplicate order)`
+          : `Print recorded — ${remaining} unit${remaining === 1 ? "" : "s"} still to print`,
+    );
   } catch (e) {
     return handle(e);
   }
@@ -208,6 +248,27 @@ export async function recordFilamentUsageAction(input: z.input<typeof filamentUs
     revalidatePath("/filament");
     revalidatePath("/production");
     return ok(undefined, "Filament usage recorded");
+  } catch (e) {
+    return handle(e);
+  }
+}
+
+const qcFailureSchema = z.object({
+  job_id: uuid,
+  unit_ids: z.array(uuid).min(1, "Choose at least one unit").max(500),
+  reason: z.string().trim().min(1, "Describe why the unit failed quality check").max(500),
+});
+
+/** Units that fail quality check go back to be reprinted (same job). */
+export async function recordQcFailureAction(input: z.input<typeof qcFailureSchema>): Promise<ActionResult> {
+  try {
+    await authoriseAction("staff");
+    const v = qcFailureSchema.parse(input);
+    const supabase = await createClient();
+    const { data, error } = await supabase.rpc("record_qc_failure", { p_job_id: v.job_id, p_reason: v.reason, p_unit_ids: v.unit_ids });
+    if (error) return fail(dbErrorMessage(error));
+    revalidateProduction();
+    return ok(undefined, `${data} unit${data === 1 ? "" : "s"} sent back for reprinting`);
   } catch (e) {
     return handle(e);
   }

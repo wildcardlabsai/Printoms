@@ -16,7 +16,7 @@ export async function getShellData(user: CurrentUser): Promise<{
   const soonIso = new Date(Date.now() + 24 * 3600_000).toISOString();
   const openStatuses = ["dispatched", "completed", "cancelled"] as const;
 
-  const [settings, newOrders, toPack, overdue, dueSoon, lowStock, integrations, pendingUsers, overrunning] = await Promise.all([
+  const [settings, newOrders, toPack, overdue, dueSoon, lowStock, integrations, pendingUsers, overrunning, needsReview] = await Promise.all([
     supabase.from("business_settings").select("business_name").maybeSingle(),
     supabase.from("orders").select("id", { count: "exact", head: true }).eq("status", "new"),
     supabase.from("orders").select("id", { count: "exact", head: true }).in("status", ["ready_to_pack", "packed"]),
@@ -41,10 +41,20 @@ export async function getShellData(user: CurrentUser): Promise<{
       .select("id, name")
       .eq("status", "printing")
       .lt("estimated_completion_at", nowIso),
+    supabase.from("orders").select("id", { count: "exact", head: true }).eq("requires_review", true),
   ]);
 
   const notifications: AppNotification[] = [];
 
+  if (needsReview.count) {
+    notifications.push({
+      id: "needs-review",
+      tone: "red",
+      title: `${needsReview.count} order${needsReview.count === 1 ? " needs" : "s need"} a decision`,
+      description: "Cancelled or changed after production started. Packing is blocked until resolved.",
+      href: "/orders?view=review",
+    });
+  }
   if (overdue.count) {
     notifications.push({
       id: "overdue",

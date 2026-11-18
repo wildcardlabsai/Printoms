@@ -48,11 +48,25 @@ export function JobCard({
           <span className="min-w-0 flex-1 truncate">· {job.order?.customer_name}</span>
           {job.is_sample || job.order?.is_sample ? <SampleBadge className="shrink-0" /> : null}
         </div>
+        {job.order?.status === "cancelled" || job.order?.requires_review ? (
+          <p className="mt-1.5 inline-flex items-center gap-1 rounded-md bg-red-50 px-1.5 py-0.5 text-[11px] font-semibold text-red-700 ring-1 ring-red-200">
+            <TriangleAlert className="size-3" />
+            {job.order?.status === "cancelled" ? "Order cancelled — decision needed" : "Order changed — review needed"}
+          </p>
+        ) : null}
         <p className="mt-1.5 line-clamp-2 text-[13.5px] font-medium leading-snug text-ink">
           {job.quantity > 1 ? <span className="mr-1 font-semibold text-brand-700">{job.quantity}×</span> : null}
           {job.product?.name ?? job.item?.title}
         </p>
         {job.item?.variant_title ? <p className="mt-0.5 truncate text-xs text-muted">{job.item.variant_title}</p> : null}
+        {job.quantity > 1 && job.quantity_printed > 0 && job.quantity_printed < job.quantity ? (
+          <div className="mt-1.5 flex items-center gap-2">
+            <span className="h-1 flex-1 overflow-hidden rounded-full bg-zinc-100">
+              <span className="block h-full rounded-full bg-brand-500" style={{ width: `${(job.quantity_printed / job.quantity) * 100}%` }} />
+            </span>
+            <span className="text-[11px] font-medium text-ink-2 tabular">{job.quantity_printed}/{job.quantity} printed</span>
+          </div>
+        ) : null}
         {job.item?.personalisation ? (
           <p className="mt-1.5 flex items-start gap-1 rounded-md bg-violet-50 px-1.5 py-1 text-[11.5px] text-violet-800">
             <Sparkles className="mt-px size-3 shrink-0" />

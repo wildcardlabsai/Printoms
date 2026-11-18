@@ -12,9 +12,19 @@ import { PriorityBadge, ShipmentStatusBadge, SourceBadge } from "@/components/ui
 import { useToast } from "@/components/ui/toast";
 import { markDispatchedAction, markPackedAction } from "@/lib/actions/fulfilment";
 import { pushShipmentAction } from "@/lib/actions/settings";
-import { CARRIERS } from "@/lib/constants";
+import { CARRIER_LABELS, validateTracking } from "@/lib/integrations/carriers";
 import { addressLines, cn, formatDate, formatDateTime, formatRelative, isOverdue } from "@/lib/utils";
 import type { FulfilmentOrder } from "@/lib/data/fulfilment";
+
+const PUSH_CATEGORY: Record<string, string> = {
+  credentials: "Connection expired",
+  rate_limited: "Marketplace busy",
+  marketplace_rejected: "Rejected by marketplace",
+  marketplace_error: "Marketplace error",
+  network: "Connection problem",
+  validation: "Check details",
+  unknown: "Unknown outcome",
+};
 
 export function FulfilmentCard({
   order,
@@ -45,6 +55,7 @@ export function FulfilmentCard({
   const [method, setMethod] = React.useState(order.shipping_method ?? "");
   const [cost, setCost] = React.useState("");
   const [error, setError] = React.useState<string | null>(null);
+  const trackingCheck = tracking.trim() ? validateTracking(carrier, tracking) : null;
   const [pending, startTransition] = React.useTransition();
 
   React.useEffect(() => {
@@ -56,7 +67,9 @@ export function FulfilmentCard({
   const allChecked = checklist.every((c) => c.done);
   const overdue = isOverdue(order.dispatch_by, order.status);
   const dispatched = order.status === "dispatched" || order.status === "completed";
-  const canPush = shipment && dispatched && order.source !== "manual" && connected.includes(order.source) && shipment.marketplace_push_status !== "sent";
+  const canPush =
+    shipment && dispatched && !order.is_sample && Boolean(shipment.tracking_number) && order.source !== "manual" &&
+    connected.includes(order.source) && shipment.marketplace_push_status !== "sent";
 
   const act = (fn: () => Promise<{ ok: boolean; error?: string; message?: string }>, after?: () => void) =>
     startTransition(async () => {
@@ -144,6 +157,12 @@ export function FulfilmentCard({
           </div>
 
           <div className="space-y-4">
+            {order.requires_review && !dispatched ? (
+              <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2.5 text-[13px] text-red-900">
+                <p className="font-semibold">Do not pack yet — this order changed after production started.</p>
+                <Link href={`/orders/${order.id}`} className="mt-1 inline-block font-medium underline">Review the changes on the order</Link>
+              </div>
+            ) : null}
             <FormError message={error} />
             {dispatched && shipment ? (
               <div className="space-y-3 rounded-xl border border-line bg-surface p-4 text-sm">
@@ -164,10 +183,33 @@ export function FulfilmentCard({
                       : <Badge>Not required</Badge>}
                   </dd>
                 </dl>
-                {shipment.marketplace_push_error ? <p className="text-xs text-red-700 [overflow-wrap:anywhere]">{shipment.marketplace_push_error}</p> : null}
+                {shipment.marketplace_push_error ? (
+                  <p className="text-xs text-red-700 [overflow-wrap:anywhere]">
+                    {PUSH_CATEGORY[shipment.marketplace_push_error_category ?? ""] ? (
+                      <span className="font-semibold">{PUSH_CATEGORY[shipment.marketplace_push_error_category ?? ""]}: </span>
+                    ) : null}
+                    {shipment.marketplace_push_error}
+                  </p>
+                ) : null}
+                {shipment.fulfilment_submissions?.length ? (
+                  <details className="text-xs text-muted">
+                    <summary className="cursor-pointer select-none hover:text-ink">
+                      {shipment.fulfilment_submissions.length} submission attempt{shipment.fulfilment_submissions.length === 1 ? "" : "s"}
+                    </summary>
+                    <ul className="mt-1.5 space-y-1">
+                      {[...shipment.fulfilment_submissions].sort((a, b) => b.attempt - a.attempt).map((s) => (
+                        <li key={s.id} className="rounded bg-subtle px-2 py-1 ring-1 ring-line">
+                          #{s.attempt} · {s.status.replace("_", " ")}
+                          {s.http_status ? ` · HTTP ${s.http_status}` : ""} · {formatDateTime(s.started_at)}
+                          {s.error_message ? <span className="block text-red-700 [overflow-wrap:anywhere]">{s.error_message}</span> : null}
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                ) : null}
                 {canWrite && canPush ? (
                   <Button size="sm" variant="outline" loading={pending} onClick={() => act(() => pushShipmentAction(shipment.id))}>
-                    <Send /> Send tracking to {order.source === "etsy" ? "Etsy" : "Shopify"}
+                    <Send /> {shipment.marketplace_push_status === "failed" ? "Retry sending tracking" : `Send tracking to ${order.source === "etsy" ? "Etsy" : "Shopify"}`}
                   </Button>
                 ) : shipment.marketplace_push_status === "pending" && order.source !== "manual" ? (
                   <p className="text-xs text-muted">Connect {order.source === "etsy" ? "Etsy" : "Shopify"} to send tracking automatically, or mark it shipped on the marketplace.</p>
@@ -217,10 +259,15 @@ export function FulfilmentCard({
                   <div className="grid gap-3 sm:grid-cols-2">
                     <Field label="Carrier" htmlFor={`c-${order.id}`}>
                       <Select id={`c-${order.id}`} value={carrier} onChange={(e) => setCarrier(e.target.value)}>
-                        {CARRIERS.map((c) => <option key={c} value={c}>{c}</option>)}
+                        {CARRIER_LABELS.map((c) => <option key={c} value={c}>{c}</option>)}
                       </Select>
                     </Field>
-                    <Field label="Tracking number" htmlFor={`t-${order.id}`}>
+                    <Field
+                      label="Tracking number"
+                      htmlFor={`t-${order.id}`}
+                      error={tracking && trackingCheck && !trackingCheck.ok ? trackingCheck.error : undefined}
+                      hint={trackingCheck?.ok && trackingCheck.warning ? trackingCheck.warning : undefined}
+                    >
                       <Input id={`t-${order.id}`} value={tracking} onChange={(e) => setTracking(e.target.value)} autoComplete="off" />
                     </Field>
                     <Field label="Shipping method" htmlFor={`m-${order.id}`}>

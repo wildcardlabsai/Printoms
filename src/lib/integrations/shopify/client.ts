@@ -30,15 +30,20 @@ export class ShopifyClient {
         headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": this.accessToken, Accept: "application/json" },
         body: JSON.stringify({ query, variables }),
       },
-      { label: "Shopify GraphQL" },
+      // Queries are safe to repeat; mutations (fulfillmentCreate) are not.
+      { label: "Shopify GraphQL", idempotent: !/^\s*mutation\b/.test(query) },
     );
     if (res.status === 401 || res.status === 403) {
       throw new IntegrationError(
         `Shopify rejected the access token (HTTP ${res.status}). Check the app is installed and has the required scopes.`,
         await safeText(res),
+        false,
+        res.status,
       );
     }
-    if (!res.ok) throw new IntegrationError(`Shopify API error (HTTP ${res.status})`, await safeText(res));
+    if (!res.ok) {
+      throw new IntegrationError(`Shopify API error (HTTP ${res.status})`, await safeText(res), res.status === 429 || res.status >= 500, res.status);
+    }
     const body = (await res.json()) as GraphQLResponse<T>;
 
     if (body.errors?.some((e) => e.extensions?.code === "THROTTLED") && attempt < 5) {

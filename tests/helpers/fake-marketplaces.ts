@@ -12,8 +12,20 @@ export class FakeMarketplaces {
   etsyCalls = 0;
   etsyTokenRefreshes = 0;
   etsyRateLimitOnce = false;
+  /** Simulate an outage: every request returns HTTP 500. */
+  etsyDown = false;
+  shopifyDown = false;
   shopify: ShopifyResponder = () => ({ data: { orders: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } } });
   shopifyQueries: string[] = [];
+  /** Etsy receipt shipments by receipt id (tracking already on Etsy). */
+  etsyShipments: Record<string, { tracking_code: string; carrier_name: string; receipt_shipping_id: number }[]> = {};
+  etsyTrackingPosts: { receiptId: string; body: URLSearchParams }[] = [];
+  /** Respond to the tracking POST with this status (simulate failures). */
+  etsyTrackingStatus: number[] = [];
+  /** Throw a network error AFTER Etsy recorded the tracking (ambiguous outcome). */
+  etsyTrackingTimeoutAfterSave = false;
+  /** Etsy refuses token refresh (revoked/expired refresh token). */
+  etsyRefreshFails = false;
   private original = globalThis.fetch;
 
   install() {
@@ -26,10 +38,33 @@ export class FakeMarketplaces {
   }
 
   private async handle(url: string, init?: RequestInit): Promise<Response> {
+    if (this.etsyDown && /etsy\.com/.test(url)) return new Response("Etsy unavailable", { status: 500 });
+    if (this.shopifyDown && /myshopify\.com/.test(url)) return new Response("Shopify unavailable", { status: 500 });
     if (url.startsWith("https://api.etsy.com/v3/public/oauth/token")) {
       this.etsyTokenRefreshes++;
+      if (this.etsyRefreshFails) return Response.json({ error: "invalid_grant" }, { status: 400 });
       return Response.json({ access_token: "1.newtoken", refresh_token: "1.newrefresh", expires_in: 3600, token_type: "Bearer" });
     }
+    const tracking = url.match(/^https:\/\/openapi\.etsy\.com\/v3\/application\/shops\/\d+\/receipts\/(\d+)\/tracking$/);
+    if (tracking && init?.method === "POST") {
+      const receiptId = tracking[1]!;
+      const forced = this.etsyTrackingStatus.shift();
+      if (forced && forced !== 200) return new Response(JSON.stringify({ error: `forced ${forced}` }), { status: forced });
+      const body = new URLSearchParams(String(init.body ?? ""));
+      this.etsyTrackingPosts.push({ receiptId, body });
+      (this.etsyShipments[receiptId] ??= []).push({
+        tracking_code: body.get("tracking_code") ?? "",
+        carrier_name: body.get("carrier_name") ?? "",
+        receipt_shipping_id: 5000 + this.etsyTrackingPosts.length,
+      });
+      if (this.etsyTrackingTimeoutAfterSave) {
+        this.etsyTrackingTimeoutAfterSave = false;
+        throw new TypeError("fetch failed: socket hang up");
+      }
+      return Response.json({ receipt_id: Number(receiptId), shipments: this.etsyShipments[receiptId] });
+    }
+    const single = url.match(/^https:\/\/openapi\.etsy\.com\/v3\/application\/shops\/\d+\/receipts\/(\d+)$/);
+    if (single) return Response.json({ receipt_id: Number(single[1]), shipments: this.etsyShipments[single[1]!] ?? [] });
     const receipts = url.match(/^https:\/\/openapi\.etsy\.com\/v3\/application\/shops\/(\d+)\/receipts\?(.*)$/);
     if (receipts) {
       this.etsyCalls++;
