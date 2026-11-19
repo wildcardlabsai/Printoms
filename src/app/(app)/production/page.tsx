@@ -4,7 +4,7 @@ import { ProductionBoard } from "@/components/production/production-board";
 import { getActivePrinters, getBoardJobs } from "@/lib/data/production";
 import { hasRole, requireUser } from "@/lib/auth";
 import { ButtonLink } from "@/components/ui/button";
-import { Printer } from "lucide-react";
+import { Printer, Ticket } from "lucide-react";
 
 export const metadata: Metadata = { title: "Production Board" };
 
@@ -20,9 +20,14 @@ export default async function ProductionPage({ searchParams }: { searchParams: P
         title="Production Board"
         description={`${open} active job${open === 1 ? "" : "s"}. Drag cards between stages — every order item is tracked separately.`}
         actions={
-          <ButtonLink href="/printers" variant="outline">
-            <Printer /> Print farm
-          </ButtonLink>
+          <div className="flex flex-wrap gap-2">
+            <ButtonLink href="/print/tickets?stage=ready_to_print" variant="outline" prefetch={false}>
+              <Ticket /> Print tickets (Ready to Print)
+            </ButtonLink>
+            <ButtonLink href="/printers" variant="outline">
+              <Printer /> Print farm
+            </ButtonLink>
+          </div>
         }
       />
       <ProductionBoard

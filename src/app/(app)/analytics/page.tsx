@@ -27,6 +27,8 @@ type Summary = {
   manual_revenue: number;
   average_order_value: number;
   est_marketplace_fees: number;
+  orders_with_actual_fees?: number;
+  orders_with_fees?: number;
   est_filament_cost: number;
   est_packaging_cost: number;
   est_other_cost: number;
@@ -180,7 +182,13 @@ export default async function AnalyticsPage({ searchParams }: { searchParams: Pr
                     ["Gross sales", c.gross_sales, "revenue"],
                     ["Tax collected", -c.tax_collected, "muted"],
                     ["Net revenue", c.net_revenue, "subtotal"],
-                    ["Marketplace fees (est.)", -c.est_marketplace_fees, "cost"],
+                    [
+                      c.orders_with_fees && c.orders_with_actual_fees
+                        ? `Marketplace fees (${c.orders_with_actual_fees === c.orders_with_fees ? "actual" : `actual for ${c.orders_with_actual_fees} of ${c.orders_with_fees} orders`})`
+                        : "Marketplace fees (est.)",
+                      -c.est_marketplace_fees,
+                      "cost",
+                    ],
                     ["Filament (est. / recorded)", -c.est_filament_cost, "cost"],
                     ["Packaging (est.)", -c.est_packaging_cost, "cost"],
                     ["Labour & other (est.)", -c.est_other_cost, "cost"],

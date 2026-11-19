@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { ArrowLeft, CalendarClock, ShieldAlert, ExternalLink, History, Mail, MapPin, MessageSquareQuote, Package, Phone, Truck } from "lucide-react";
+import { ArrowLeft, CalendarClock, ShieldAlert, ExternalLink, History, Mail, MapPin, MessageSquareQuote, Package, Phone, Ticket, FileText, Truck } from "lucide-react";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { SampleBadge } from "@/components/ui/badge";
 import { DescriptionList, Notice } from "@/components/ui/misc";
@@ -10,6 +10,7 @@ import { ButtonLink } from "@/components/ui/button";
 import { ActivityTimeline } from "@/components/orders/activity-timeline";
 import { NotesPanel } from "@/components/orders/notes-panel";
 import { OrderActions } from "@/components/orders/order-actions";
+import { OrderFeesSummary } from "@/components/orders/order-fees";
 import { OrderInternalForm } from "@/components/orders/order-internal-form";
 import { OrderItemCard } from "@/components/orders/order-item-card";
 import { OrderReviewsPanel } from "@/components/orders/order-reviews-panel";
@@ -66,6 +67,7 @@ export default async function OrderDetailPage({ params }: { params: Promise<{ id
   const overdue = isOverdue(order.dispatch_by, order.status);
   const address = addressLines(order.shipping_address);
   const unitCount = order.order_items.reduce((s, i) => s + i.quantity, 0);
+  const jobIds = order.order_items.map((i) => i.production_jobs?.id).filter((x): x is string => Boolean(x));
   const shipment = order.shipments?.[0];
 
   return (
@@ -102,6 +104,14 @@ export default async function OrderDetailPage({ params }: { params: Promise<{ id
               <Package /> Pack & dispatch
             </ButtonLink>
           ) : null}
+          {jobIds.length ? (
+            <ButtonLink href={`/print/tickets?ids=${jobIds.join(",")}`} variant="outline" prefetch={false}>
+              <Ticket /> Job tickets
+            </ButtonLink>
+          ) : null}
+          <ButtonLink href={`/print/slips?ids=${order.id}`} variant="outline" prefetch={false}>
+            <FileText /> Packing slip
+          </ButtonLink>
           {canWrite ? <OrderActions orderId={order.id} status={order.status} /> : null}
         </div>
       </div>
@@ -161,6 +171,7 @@ export default async function OrderDetailPage({ params }: { params: Promise<{ id
                   <span>Total</span>
                   <span className="tabular">{formatCurrency(order.total, order.currency)}</span>
                 </div>
+                <OrderFeesSummary order={order} />
               </div>
             </CardContent>
           </Card>

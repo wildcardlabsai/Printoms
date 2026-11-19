@@ -205,6 +205,9 @@ function JobDetailContent({ jobId, printers, canWrite }: { jobId: string; printe
                     View order <ExternalLink className="size-3.5" />
                   </Link>
                 ) : null}
+                <a href={`/print/tickets?ids=${job.id}`} target="_blank" rel="noopener" className={`${job.order ? "" : "ml-auto "}inline-flex items-center gap-1 text-[13px] font-medium text-brand-700 hover:underline`}>
+                  Print ticket <ExternalLink className="size-3.5" />
+                </a>
               </div>
 
               <Section title="What to make">

@@ -5,6 +5,8 @@ import type { Json } from "@/types/database";
 import { getIntegration } from "./credentials";
 import { clampSince } from "./import-window";
 import { createAdapter } from "./registry";
+import { sendNewOrderAlerts } from "@/lib/notifications/new-order-alerts";
+import { syncOrderFees } from "./fee-sync";
 import { IntegrationError, type NormalisedOrder, type SyncWarning } from "./types";
 
 export type SyncTrigger = "scheduled" | "manual" | "initial" | "webhook" | "resync";
@@ -105,7 +107,20 @@ export async function runSync(
 ): Promise<SyncResult> {
   // Never throw: one marketplace's problem must not stop another's sync.
   try {
-    return await runSyncUnsafe(provider, trigger, triggeredBy, admin ?? createAdminClient(), options);
+    const client = admin ?? createAdminClient();
+    const result = await runSyncUnsafe(provider, trigger, triggeredBy, client, options);
+    // New-order emails (also covers orders imported by a manual retry since the
+    // last run). Runs after the import and never affects the sync result.
+    if (result.status !== "failed" && result.status !== "skipped") {
+      const alert = await sendNewOrderAlerts(client);
+      if (alert.status === "failed") console.error(`[alerts] new-order email failed: ${alert.error}`);
+      // Actual marketplace fees for recent orders (read-only, best effort).
+      if (provider === "etsy" || provider === "shopify") {
+        const fees = await syncOrderFees(client, provider);
+        if (fees.status === "failed") console.error(`[fees:${provider}] ${fees.error}`);
+      }
+    }
+    return result;
   } catch (e) {
     const err = describeError(e);
     console.error(`[sync:${provider}] unexpected error`, e);

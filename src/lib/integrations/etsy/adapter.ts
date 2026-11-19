@@ -1,6 +1,7 @@
 import "server-only";
 import type { AdminSupabase } from "@/lib/supabase/admin";
-import type { FetchContext, FulfilmentPush, MarketplaceAdapter, MarketplaceListing, OrderPage } from "../types";
+import type { FeeTarget, FetchContext, FulfilmentPush, MarketplaceAdapter, MarketplaceListing, OrderPage } from "../types";
+import { etsyOrderFees, type EtsyLedgerEntry, type EtsyPayment, type OrderFees } from "../fees";
 import { mapEtsyListing, type EtsyListing } from "../listings";
 import { findCarrier, normaliseTracking } from "../carriers";
 import { EtsyClient } from "./client";
@@ -43,6 +44,43 @@ export class EtsyAdapter implements MarketplaceAdapter {
       yield { orders, maxUpdatedAt };
       if (data.results.length < PAGE_SIZE || (page + 1) * PAGE_SIZE >= data.count) return;
     }
+  }
+
+  /**
+   * Actual fees (read-only, transactions_r): the card processing fee from each
+   * receipt's payments, plus ledger entries that refer to the receipt or one of
+   * its transactions. The ledger is read once, in 30-day windows, for all orders.
+   */
+  async fetchOrderFees(orders: FeeTarget[]): Promise<Map<string, OrderFees>> {
+    const out = new Map<string, OrderFees>();
+    if (!orders.length) return out;
+    const byReceipt = new Map(orders.map((o) => [o.external_order_id, o.id]));
+    const byTransaction = new Map<string, string>();
+    for (const o of orders) for (const l of o.line_ids) byTransaction.set(l, o.id);
+    const ledger = new Map<string, EtsyLedgerEntry[]>();
+    const now = Math.floor(Date.now() / 1000);
+    const earliest = Math.min(...orders.map((o) => Math.floor(Date.parse(o.order_date) / 1000))) - 86_400;
+    for (let from = earliest; from < now; from += 30 * 86_400) {
+      const to = Math.min(from + 30 * 86_400, now);
+      for (let page = 0; page < 30; page++) {
+        const params = new URLSearchParams({ min_created: String(from), max_created: String(to), limit: "100", offset: String(page * 100) });
+        const data = await this.client.request<{ count: number; results: EtsyLedgerEntry[] }>(`/shops/${this.shopId}/payment-account/ledger-entries?${params}`);
+        for (const e of data.results) {
+          const ref = String(e.reference_id ?? "");
+          const type = (e.reference_type ?? "").toLowerCase();
+          const orderId = type.includes("receipt") ? byReceipt.get(ref) : type.includes("transaction") ? byTransaction.get(ref) : (byReceipt.get(ref) ?? byTransaction.get(ref));
+          if (orderId) (ledger.get(orderId) ?? ledger.set(orderId, []).get(orderId)!).push(e);
+        }
+        if (data.results.length < 100) break;
+      }
+    }
+    for (const o of orders) {
+      const payments = await this.client.request<{ count: number; results: EtsyPayment[] }>(
+        `/shops/${this.shopId}/receipts/${encodeURIComponent(o.external_order_id)}/payments`,
+      );
+      out.set(o.id, etsyOrderFees(payments.results ?? [], ledger.get(o.id) ?? []));
+    }
+    return out;
   }
 
   /** Active listings (getListingsByShop, read-only), 100 per page, with images. */

@@ -1,5 +1,6 @@
 import "server-only";
-import type { FetchContext, FulfilmentPush, MarketplaceAdapter, MarketplaceListing, OrderPage } from "../types";
+import type { FeeTarget, FetchContext, FulfilmentPush, MarketplaceAdapter, MarketplaceListing, OrderPage } from "../types";
+import { shopifyOrderFees, type OrderFees, type ShopifyFeeTransaction } from "../fees";
 import { mapShopifyProduct, type ShopifyProductNode } from "../listings";
 import { IntegrationError } from "../types";
 import { ShopifyClient } from "./client";
@@ -50,6 +51,20 @@ export const ORDERS_QUERY_RESTRICTED = ordersQuery(false);
 
 type OrdersData = { orders: { pageInfo: { hasNextPage: boolean; endCursor: string | null }; nodes: ShopifyOrderNode[] } | null };
 
+export const ORDER_FEES_QUERY = /* GraphQL */ `
+  query PrintFlowOrderFees($ids: [ID!]!) {
+    nodes(ids: $ids) {
+      ... on Order {
+        id
+        transactions(first: 25) {
+          id kind status gateway
+          fees { id type rateName flatFeeName amount { amount currencyCode } taxAmount { amount currencyCode } }
+        }
+      }
+    }
+  }
+`;
+
 export const PRODUCTS_QUERY = /* GraphQL */ `
   query PrintFlowProducts($first: Int!, $after: String) {
     products(first: $first, after: $after, sortKey: ID) {
@@ -98,6 +113,21 @@ export class ShopifyAdapter implements MarketplaceAdapter {
 
   constructor(shop: string, accessToken: string) {
     this.client = new ShopifyClient(shop, accessToken);
+  }
+
+  /** Shopify Payments transaction fees (read_orders), 25 orders per request. */
+  async fetchOrderFees(orders: FeeTarget[]): Promise<Map<string, OrderFees>> {
+    const out = new Map<string, OrderFees>();
+    const byGid = new Map(orders.map((o) => [o.external_order_id, o.id]));
+    for (let i = 0; i < orders.length; i += 25) {
+      const ids = orders.slice(i, i + 25).map((o) => o.external_order_id);
+      const data = await this.client.graphql<{ nodes: ({ id: string; transactions: ShopifyFeeTransaction[] } | null)[] }>(ORDER_FEES_QUERY, { ids });
+      for (const n of data.nodes) {
+        const orderId = n ? byGid.get(n.id) : undefined;
+        if (n && orderId) out.set(orderId, shopifyOrderFees(n.transactions ?? []));
+      }
+    }
+    return out;
   }
 
   /** All products (read_products), 50 per page. */

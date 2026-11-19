@@ -23,3 +23,6 @@ process.env.SHOPIFY_STORE_DOMAIN ||= "printflow-test.myshopify.com";
 process.env.SHOPIFY_ADMIN_ACCESS_TOKEN ||= "shpat_test";
 process.env.VINTED_ACCESS_TOKEN = "test-access-key,test-signing-key";
 process.env.VINTED_ENVIRONMENT = "production";
+// Emails go to the fake Resend endpoint in FakeMarketplaces; never sent for real.
+process.env.RESEND_API_KEY = "re_test_key";
+process.env.ALERT_FROM_EMAIL = "PrintFlow Test <alerts@example.com>";

@@ -51,14 +51,14 @@ isOneToOne: false
                   ]
                 },"business_settings": {
                   Row: {
-                    "business_name": string,"created_at": string,"currency": string,"default_dispatch_days": number,"default_filament_cost_per_kg": number,"default_packaging_cost": number,"etsy_fee_percent": number,"etsy_fixed_fee": number,"id": string,"packing_checklist": (string)[],"shopify_fee_percent": number,"shopify_fixed_fee": number,"singleton": boolean,"timezone": string,"updated_at": string
+                    "business_name": string,"contact_email": string | null,"created_at": string,"currency": string,"default_dispatch_days": number,"default_filament_cost_per_kg": number,"default_packaging_cost": number,"etsy_fee_percent": number,"etsy_fixed_fee": number,"id": string,"logo_path": string | null,"new_order_alert_email": string | null,"new_order_alerts_enabled": boolean,"new_order_alerts_since": string | null,"packing_checklist": (string)[],"return_address": string | null,"shopify_fee_percent": number,"shopify_fixed_fee": number,"singleton": boolean,"slip_message": string,"slip_show_prices": boolean,"timezone": string,"updated_at": string
                   }
                   ComputedFields: never
                   Insert: {
-                    "business_name"?: string,"created_at"?: string,"currency"?: string,"default_dispatch_days"?: number,"default_filament_cost_per_kg"?: number,"default_packaging_cost"?: number,"etsy_fee_percent"?: number,"etsy_fixed_fee"?: number,"id"?: string,"packing_checklist"?: (string)[],"shopify_fee_percent"?: number,"shopify_fixed_fee"?: number,"singleton"?: boolean,"timezone"?: string,"updated_at"?: string
+                    "business_name"?: string,"contact_email"?: string | null,"created_at"?: string,"currency"?: string,"default_dispatch_days"?: number,"default_filament_cost_per_kg"?: number,"default_packaging_cost"?: number,"etsy_fee_percent"?: number,"etsy_fixed_fee"?: number,"id"?: string,"logo_path"?: string | null,"new_order_alert_email"?: string | null,"new_order_alerts_enabled"?: boolean,"new_order_alerts_since"?: string | null,"packing_checklist"?: (string)[],"return_address"?: string | null,"shopify_fee_percent"?: number,"shopify_fixed_fee"?: number,"singleton"?: boolean,"slip_message"?: string,"slip_show_prices"?: boolean,"timezone"?: string,"updated_at"?: string
                   }
                   Update: {
-                    "business_name"?: string,"created_at"?: string,"currency"?: string,"default_dispatch_days"?: number,"default_filament_cost_per_kg"?: number,"default_packaging_cost"?: number,"etsy_fee_percent"?: number,"etsy_fixed_fee"?: number,"id"?: string,"packing_checklist"?: (string)[],"shopify_fee_percent"?: number,"shopify_fixed_fee"?: number,"singleton"?: boolean,"timezone"?: string,"updated_at"?: string
+                    "business_name"?: string,"contact_email"?: string | null,"created_at"?: string,"currency"?: string,"default_dispatch_days"?: number,"default_filament_cost_per_kg"?: number,"default_packaging_cost"?: number,"etsy_fee_percent"?: number,"etsy_fixed_fee"?: number,"id"?: string,"logo_path"?: string | null,"new_order_alert_email"?: string | null,"new_order_alerts_enabled"?: boolean,"new_order_alerts_since"?: string | null,"packing_checklist"?: (string)[],"return_address"?: string | null,"shopify_fee_percent"?: number,"shopify_fixed_fee"?: number,"singleton"?: boolean,"slip_message"?: string,"slip_show_prices"?: boolean,"timezone"?: string,"updated_at"?: string
                   }
                   Relationships: [
                     
@@ -279,6 +279,26 @@ isOneToOne: false
       referencedColumns: ["id"]
     }
                   ]
+                },"order_fees": {
+                  Row: {
+                    "amount": number,"counted": boolean,"created_at": string,"currency": string,"external_ref": string,"id": string,"kind": string,"label": string,"order_id": string,"raw": NonNullable<Json>,"source": Database["public"]['Enums']["integration_provider"],"updated_at": string
+                  }
+                  ComputedFields: never
+                  Insert: {
+                    "amount": number,"counted"?: boolean,"created_at"?: string,"currency": string,"external_ref": string,"id"?: string,"kind": string,"label": string,"order_id": string,"raw"?: NonNullable<Json>,"source": Database["public"]['Enums']["integration_provider"],"updated_at"?: string
+                  }
+                  Update: {
+                    "amount"?: number,"counted"?: boolean,"created_at"?: string,"currency"?: string,"external_ref"?: string,"id"?: string,"kind"?: string,"label"?: string,"order_id"?: string,"raw"?: NonNullable<Json>,"source"?: Database["public"]['Enums']["integration_provider"],"updated_at"?: string
+                  }
+                  Relationships: [
+                    {
+      foreignKeyName: "order_fees_order_id_fkey"
+      columns: ["order_id"]
+isOneToOne: false
+      referencedRelation: "orders"
+      referencedColumns: ["id"]
+    }
+                  ]
                 },"order_items": {
                   Row: {
                     "created_at": string,"external_line_item_id": string | null,"external_listing_id": string | null,"external_variant_id": string | null,"id": string,"internal_notes": string | null,"marketplace_options": Json | null,"marketplace_status": string,"order_id": string,"personalisation": string | null,"personalisation_changed_at": string | null,"product_id": string | null,"quantity": number,"removed_at": string | null,"sku": string | null,"title": string,"total_price": number,"unit_price": number,"updated_at": string,"variant_details": NonNullable<Json>,"variant_title": string | null
@@ -345,14 +365,14 @@ isOneToOne: false
                   ]
                 },"orders": {
                   Row: {
-                    "carrier": string | null,"completed_at": string | null,"created_at": string,"created_by": string | null,"currency": string,"customer_data_restricted_fields": (string)[],"customer_data_status": string,"customer_email": string | null,"customer_id": string | null,"customer_name": string,"customer_note": string | null,"discount_total": number,"dispatch_by": string | null,"dispatched_at": string | null,"external_order_id": string | null,"external_order_number": string | null,"id": string,"is_sample": boolean,"last_synced_at": string | null,"marketplace_amended_at": string | null,"marketplace_cancelled_at": string | null,"marketplace_dispatch_by": string | null,"marketplace_fulfilment_status": string | null,"marketplace_status": string | null,"marketplace_updated_at": string | null,"order_date": string,"order_number": string,"payment_status": Database["public"]['Enums']["payment_status"],"priority": Database["public"]['Enums']["priority_level"],"production_notes": string | null,"requires_review": boolean,"search_text": string | null,"shipping_address": NonNullable<Json>,"shipping_method": string | null,"shipping_total": number,"source": Database["public"]['Enums']["order_source"],"status": Database["public"]['Enums']["order_status"],"subtotal": number,"tax_total": number,"total": number,"tracking_number": string | null,"updated_at": string
+                    "carrier": string | null,"completed_at": string | null,"created_at": string,"created_by": string | null,"currency": string,"customer_data_restricted_fields": (string)[],"customer_data_status": string,"customer_email": string | null,"customer_id": string | null,"customer_name": string,"customer_note": string | null,"discount_total": number,"dispatch_by": string | null,"dispatched_at": string | null,"external_order_id": string | null,"external_order_number": string | null,"fee_basis": string | null,"fees_synced_at": string | null,"id": string,"is_sample": boolean,"last_synced_at": string | null,"marketplace_amended_at": string | null,"marketplace_cancelled_at": string | null,"marketplace_dispatch_by": string | null,"marketplace_fulfilment_status": string | null,"marketplace_status": string | null,"marketplace_updated_at": string | null,"new_order_alert_sent_at": string | null,"order_date": string,"order_number": string,"payment_status": Database["public"]['Enums']["payment_status"],"priority": Database["public"]['Enums']["priority_level"],"production_notes": string | null,"requires_review": boolean,"search_text": string | null,"shipping_address": NonNullable<Json>,"shipping_method": string | null,"shipping_total": number,"source": Database["public"]['Enums']["order_source"],"status": Database["public"]['Enums']["order_status"],"subtotal": number,"tax_total": number,"total": number,"tracking_number": string | null,"updated_at": string
                   }
                   ComputedFields: never
                   Insert: {
-                    "carrier"?: string | null,"completed_at"?: string | null,"created_at"?: string,"created_by"?: string | null,"currency"?: string,"customer_data_restricted_fields"?: (string)[],"customer_data_status"?: string,"customer_email"?: string | null,"customer_id"?: string | null,"customer_name": string,"customer_note"?: string | null,"discount_total"?: number,"dispatch_by"?: string | null,"dispatched_at"?: string | null,"external_order_id"?: string | null,"external_order_number"?: string | null,"id"?: string,"is_sample"?: boolean,"last_synced_at"?: string | null,"marketplace_amended_at"?: string | null,"marketplace_cancelled_at"?: string | null,"marketplace_dispatch_by"?: string | null,"marketplace_fulfilment_status"?: string | null,"marketplace_status"?: string | null,"marketplace_updated_at"?: string | null,"order_date"?: string,"order_number"?: string,"payment_status"?: Database["public"]['Enums']["payment_status"],"priority"?: Database["public"]['Enums']["priority_level"],"production_notes"?: string | null,"requires_review"?: boolean,"search_text"?: never,"shipping_address"?: NonNullable<Json>,"shipping_method"?: string | null,"shipping_total"?: number,"source": Database["public"]['Enums']["order_source"],"status"?: Database["public"]['Enums']["order_status"],"subtotal"?: number,"tax_total"?: number,"total"?: number,"tracking_number"?: string | null,"updated_at"?: string
+                    "carrier"?: string | null,"completed_at"?: string | null,"created_at"?: string,"created_by"?: string | null,"currency"?: string,"customer_data_restricted_fields"?: (string)[],"customer_data_status"?: string,"customer_email"?: string | null,"customer_id"?: string | null,"customer_name": string,"customer_note"?: string | null,"discount_total"?: number,"dispatch_by"?: string | null,"dispatched_at"?: string | null,"external_order_id"?: string | null,"external_order_number"?: string | null,"fee_basis"?: string | null,"fees_synced_at"?: string | null,"id"?: string,"is_sample"?: boolean,"last_synced_at"?: string | null,"marketplace_amended_at"?: string | null,"marketplace_cancelled_at"?: string | null,"marketplace_dispatch_by"?: string | null,"marketplace_fulfilment_status"?: string | null,"marketplace_status"?: string | null,"marketplace_updated_at"?: string | null,"new_order_alert_sent_at"?: string | null,"order_date"?: string,"order_number"?: string,"payment_status"?: Database["public"]['Enums']["payment_status"],"priority"?: Database["public"]['Enums']["priority_level"],"production_notes"?: string | null,"requires_review"?: boolean,"search_text"?: never,"shipping_address"?: NonNullable<Json>,"shipping_method"?: string | null,"shipping_total"?: number,"source": Database["public"]['Enums']["order_source"],"status"?: Database["public"]['Enums']["order_status"],"subtotal"?: number,"tax_total"?: number,"total"?: number,"tracking_number"?: string | null,"updated_at"?: string
                   }
                   Update: {
-                    "carrier"?: string | null,"completed_at"?: string | null,"created_at"?: string,"created_by"?: string | null,"currency"?: string,"customer_data_restricted_fields"?: (string)[],"customer_data_status"?: string,"customer_email"?: string | null,"customer_id"?: string | null,"customer_name"?: string,"customer_note"?: string | null,"discount_total"?: number,"dispatch_by"?: string | null,"dispatched_at"?: string | null,"external_order_id"?: string | null,"external_order_number"?: string | null,"id"?: string,"is_sample"?: boolean,"last_synced_at"?: string | null,"marketplace_amended_at"?: string | null,"marketplace_cancelled_at"?: string | null,"marketplace_dispatch_by"?: string | null,"marketplace_fulfilment_status"?: string | null,"marketplace_status"?: string | null,"marketplace_updated_at"?: string | null,"order_date"?: string,"order_number"?: string,"payment_status"?: Database["public"]['Enums']["payment_status"],"priority"?: Database["public"]['Enums']["priority_level"],"production_notes"?: string | null,"requires_review"?: boolean,"search_text"?: never,"shipping_address"?: NonNullable<Json>,"shipping_method"?: string | null,"shipping_total"?: number,"source"?: Database["public"]['Enums']["order_source"],"status"?: Database["public"]['Enums']["order_status"],"subtotal"?: number,"tax_total"?: number,"total"?: number,"tracking_number"?: string | null,"updated_at"?: string
+                    "carrier"?: string | null,"completed_at"?: string | null,"created_at"?: string,"created_by"?: string | null,"currency"?: string,"customer_data_restricted_fields"?: (string)[],"customer_data_status"?: string,"customer_email"?: string | null,"customer_id"?: string | null,"customer_name"?: string,"customer_note"?: string | null,"discount_total"?: number,"dispatch_by"?: string | null,"dispatched_at"?: string | null,"external_order_id"?: string | null,"external_order_number"?: string | null,"fee_basis"?: string | null,"fees_synced_at"?: string | null,"id"?: string,"is_sample"?: boolean,"last_synced_at"?: string | null,"marketplace_amended_at"?: string | null,"marketplace_cancelled_at"?: string | null,"marketplace_dispatch_by"?: string | null,"marketplace_fulfilment_status"?: string | null,"marketplace_status"?: string | null,"marketplace_updated_at"?: string | null,"new_order_alert_sent_at"?: string | null,"order_date"?: string,"order_number"?: string,"payment_status"?: Database["public"]['Enums']["payment_status"],"priority"?: Database["public"]['Enums']["priority_level"],"production_notes"?: string | null,"requires_review"?: boolean,"search_text"?: never,"shipping_address"?: NonNullable<Json>,"shipping_method"?: string | null,"shipping_total"?: number,"source"?: Database["public"]['Enums']["order_source"],"status"?: Database["public"]['Enums']["order_status"],"subtotal"?: number,"tax_total"?: number,"total"?: number,"tracking_number"?: string | null,"updated_at"?: string
                   }
                   Relationships: [
                     {
@@ -798,6 +818,9 @@ isOneToOne: false
 "can_write":
 { Args: Record<PropertyKey, never>; Returns: boolean
                            },
+"claim_new_order_alerts":
+{ Args: { "p_limit"?: number }; Returns: string[]
+                           },
 "close_unstarted_job":
 { Args: { "p_job_id": string,"p_reason": string }; Returns: undefined
                            },
@@ -861,6 +884,9 @@ isOneToOne: false
 "raise_order_review":
 { Args: { "p_actor_label"?: string,"p_details": Json,"p_fingerprint": string,"p_item_id": string,"p_job_id": string,"p_kind": string,"p_message": string,"p_order_id": string,"p_severity": string,"p_source"?: string,"p_title": string }; Returns: boolean
                            },
+"record_order_fees":
+{ Args: { "p_basis": string,"p_lines": Json,"p_order_id": string }; Returns: undefined
+                           },
 "record_qc_failure":
 { Args: { "p_count"?: number,"p_job_id": string,"p_reason": string,"p_unit_ids"?: (string)[] }; Returns: number
                            },
@@ -872,6 +898,9 @@ isOneToOne: false
                            },
 "refresh_order_status":
 { Args: { "p_order_id": string }; Returns: undefined
+                           },
+"release_new_order_alerts":
+{ Args: { "p_order_ids": (string)[] }; Returns: undefined
                            },
 "reopen_cancelled_order":
 { Args: { "p_order_id": string }; Returns: undefined

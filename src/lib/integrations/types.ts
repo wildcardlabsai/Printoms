@@ -89,6 +89,9 @@ export type FulfilmentPush = {
 
 export type FulfilmentResult = { externalId: string | null; response: unknown };
 
+/** An order whose fees should be read: PrintFlow id, marketplace id, date, line ids. */
+export type FeeTarget = { id: string; external_order_id: string; order_date: string; line_ids: string[] };
+
 /** One marketplace listing (Etsy listing / Shopify product), for product import. */
 export type MarketplaceListing = {
   external_listing_id: string;
@@ -116,6 +119,8 @@ export interface MarketplaceAdapter {
    * submission so a retry after an ambiguous outcome never creates a duplicate.
    */
   findExistingFulfilment(input: FulfilmentPush): Promise<{ externalId: string | null } | null>;
+  /** Actual fees for these orders (read-only). Optional per marketplace. */
+  fetchOrderFees?(orders: FeeTarget[]): Promise<Map<string, import("./fees").OrderFees>>;
   /** Iterate pages of the shop's listings/products (read-only). Optional per marketplace. */
   fetchListings?(onPage?: (page: number) => void): AsyncGenerator<MarketplaceListing[]>;
 }

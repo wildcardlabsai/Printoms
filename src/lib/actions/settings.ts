@@ -6,12 +6,22 @@ import { authoriseAction, AuthorisationError } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { dbErrorMessage, fail, ok, type ActionResult } from "@/lib/action-result";
-import { businessSettingsSchema, integrationSettingsSchema, type BusinessSettingsInput } from "@/lib/validation/settings";
+import {
+  alertSettingsSchema,
+  businessSettingsSchema,
+  integrationSettingsSchema,
+  slipSettingsSchema,
+  type AlertSettingsInput,
+  type BusinessSettingsInput,
+  type SlipSettingsInput,
+} from "@/lib/validation/settings";
+import { sendEmail } from "@/lib/notifications/email";
+import { buildNewOrderEmail } from "@/lib/notifications/new-order-alerts";
+import { hasServiceRole, resolveSiteUrl, serverEnv } from "@/lib/server-env";
 import { uuid } from "@/lib/validation/common";
 import { deleteCredentials, getIntegration } from "@/lib/integrations/credentials";
 import { pushShipmentToMarketplace } from "@/lib/integrations/fulfilment";
 import { retrySyncFailure } from "@/lib/integrations/failures";
-import { hasServiceRole } from "@/lib/server-env";
 import { maxImportDays } from "@/lib/integrations/import-window";
 
 function handle(e: unknown): ActionResult<never> {
@@ -204,6 +214,91 @@ export async function reopenSyncFailureAction(failureId: string, note?: string):
     if (error) return fail(dbErrorMessage(error));
     revalidatePath("/settings/integrations");
     return ok(undefined, "Reopened — it will be retried on the next sync.");
+  } catch (e) {
+    return handle(e);
+  }
+}
+
+/** Packing slip details: return address, contact email, message, prices. */
+export async function updateSlipSettingsAction(input: SlipSettingsInput): Promise<ActionResult> {
+  try {
+    await authoriseAction("admin");
+    const parsed = slipSettingsSchema.safeParse(input);
+    if (!parsed.success) return fail("Please check the highlighted fields", z.flattenError(parsed.error).fieldErrors as Record<string, string[]>);
+    const supabase = await createClient();
+    const { error } = await supabase.from("business_settings").update(parsed.data).eq("singleton", true);
+    if (error) return fail(dbErrorMessage(error));
+    revalidatePath("/settings");
+    return ok(undefined, "Packing slip settings saved");
+  } catch (e) {
+    return handle(e);
+  }
+}
+
+/** Set or remove the logo printed on packing slips (stored under branding/). */
+export async function setBrandLogoAction(path: string | null): Promise<ActionResult> {
+  try {
+    await authoriseAction("admin");
+    if (path !== null && !/^branding\/logo-\d+\.(png|jpg|jpeg|webp|gif)$/.test(path)) return fail("Invalid logo file");
+    const supabase = await createClient();
+    const { data: before } = await supabase.from("business_settings").select("logo_path").eq("singleton", true).single();
+    const { error } = await supabase.from("business_settings").update({ logo_path: path }).eq("singleton", true);
+    if (error) return fail(dbErrorMessage(error));
+    if (before?.logo_path && before.logo_path !== path) await supabase.storage.from("product-images").remove([before.logo_path]);
+    revalidatePath("/settings");
+    return ok(undefined, path ? "Logo updated" : "Logo removed");
+  } catch (e) {
+    return handle(e);
+  }
+}
+
+/**
+ * New-order email alerts. Switching them on records the time, so only orders
+ * imported from now on are ever emailed — never your existing orders.
+ */
+export async function updateAlertSettingsAction(input: AlertSettingsInput): Promise<ActionResult> {
+  try {
+    await authoriseAction("admin");
+    const parsed = alertSettingsSchema.safeParse(input);
+    if (!parsed.success) return fail("Please check the highlighted fields", z.flattenError(parsed.error).fieldErrors as Record<string, string[]>);
+    const supabase = await createClient();
+    const { data: current } = await supabase.from("business_settings").select("new_order_alerts_enabled").eq("singleton", true).single();
+    const turningOn = parsed.data.new_order_alerts_enabled && !current?.new_order_alerts_enabled;
+    const { error } = await supabase
+      .from("business_settings")
+      .update({ ...parsed.data, ...(turningOn ? { new_order_alerts_since: new Date().toISOString() } : {}) })
+      .eq("singleton", true);
+    if (error) return fail(dbErrorMessage(error));
+    revalidatePath("/settings");
+    return ok(undefined, turningOn ? "Alerts on — you’ll get an email for each new order from now on" : "Alert settings saved");
+  } catch (e) {
+    return handle(e);
+  }
+}
+
+/** Send a sample new-order email to the alert address. */
+export async function sendTestAlertAction(): Promise<ActionResult> {
+  try {
+    await authoriseAction("admin");
+    if (!serverEnv.email.resendApiKey) return fail("Add RESEND_API_KEY in Vercel (then redeploy) to send emails.");
+    const supabase = await createClient();
+    const { data: s } = await supabase.from("business_settings").select("business_name, timezone, new_order_alert_email").eq("singleton", true).single();
+    if (!s?.new_order_alert_email) return fail("Save an alert email address first.");
+    const email = buildNewOrderEmail(
+      [{
+        id: "00000000-0000-0000-0000-000000000000",
+        order_number: "PF-TEST",
+        source: "etsy",
+        customer_name: "Test Customer",
+        total: 24.5,
+        currency: "GBP",
+        dispatch_by: new Date(Date.now() + 3 * 86_400_000).toISOString(),
+        order_items: [{ title: "Personalised Keyring (test)", variant_title: "Black", personalisation: "Name: Sam", quantity: 1, marketplace_status: "active" }],
+      }],
+      { businessName: s.business_name, timezone: s.timezone, siteUrl: resolveSiteUrl() },
+    );
+    const res = await sendEmail({ to: s.new_order_alert_email, subject: `[Test] ${email.subject}`, html: email.html, text: email.text });
+    return res.ok ? ok(undefined, `Test email sent to ${s.new_order_alert_email}`) : fail(res.error);
   } catch (e) {
     return handle(e);
   }

@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
-import { PackageCheck, Truck } from "lucide-react";
+import { FileText, PackageCheck, Truck } from "lucide-react";
+import { ButtonLink } from "@/components/ui/button";
 import { PageHeader } from "@/components/ui/page-header";
 import { Card } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -29,6 +30,11 @@ export default async function FulfilmentPage({ searchParams }: { searchParams: P
       <PageHeader
         title="Packing & Dispatch"
         description="Check, pack and ship completed orders. Tracking can be sent back to Etsy and Shopify."
+        actions={
+          <ButtonLink href="/print/slips?view=to_pack" variant="outline" prefetch={false}>
+            <FileText /> Print packing slips
+          </ButtonLink>
+        }
       />
       <TabNav
         className="mb-5"

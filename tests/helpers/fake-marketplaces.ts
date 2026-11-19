@@ -1,6 +1,7 @@
 import type { EtsyReceipt } from "../../src/lib/integrations/etsy/mapper";
 import type { EtsyListing } from "../../src/lib/integrations/listings";
 import type { VintedOrder } from "../../src/lib/integrations/vinted/mapper";
+import type { EtsyLedgerEntry, EtsyPayment } from "../../src/lib/integrations/fees";
 import { createHmac } from "node:crypto";
 
 /** A valid 1×1 PNG, served for marketplace image URLs. */
@@ -47,6 +48,15 @@ export class FakeMarketplaces {
   /** Label behaviour per order id: "pdf" (default) or a 404 error code. */
   vintedLabels: Record<string, string> = {};
   vintedBadSignatures = 0;
+  /** Etsy payment-account ledger and per-receipt payments (fees). */
+  etsyLedger: EtsyLedgerEntry[] = [];
+  etsyPayments: Record<string, EtsyPayment[]> = {};
+  etsyLedgerCalls: string[] = [];
+  /** Emails "sent" through the fake Resend API. */
+  emails: { body: { from: string; to: string[]; subject: string; html: string; text: string }; idempotencyKey: string | null }[] = [];
+  /** Force these HTTP statuses on the next Resend calls. */
+  resendStatus: number[] = [];
+  private resendKeys = new Set<string>();
   private original = globalThis.fetch;
 
   install() {
@@ -84,6 +94,20 @@ export class FakeMarketplaces {
       }
       return Response.json({ receipt_id: Number(receiptId), shipments: this.etsyShipments[receiptId] });
     }
+    const ledger = url.match(/^https:\/\/openapi\.etsy\.com\/v3\/application\/shops\/\d+\/payment-account\/ledger-entries\?(.*)$/);
+    if (ledger) {
+      this.etsyLedgerCalls.push(ledger[1]!);
+      const p = new URLSearchParams(ledger[1]);
+      if (!p.get("min_created") || !p.get("max_created")) return Response.json({ error: "min_created and max_created are required" }, { status: 400 });
+      const inRange = this.etsyLedger.filter((e) => (e.create_date ?? 0) >= Number(p.get("min_created")) && (e.create_date ?? 0) <= Number(p.get("max_created")));
+      const offset = Number(p.get("offset") ?? 0);
+      return Response.json({ count: inRange.length, results: inRange.slice(offset, offset + Number(p.get("limit") ?? 100)) });
+    }
+    const payments = url.match(/^https:\/\/openapi\.etsy\.com\/v3\/application\/shops\/\d+\/receipts\/(\d+)\/payments$/);
+    if (payments) {
+      const results = this.etsyPayments[payments[1]!] ?? [];
+      return Response.json({ count: results.length, results });
+    }
     const listings = url.match(/^https:\/\/openapi\.etsy\.com\/v3\/application\/shops\/\d+\/listings\?(.*)$/);
     if (listings) {
       const p = new URLSearchParams(listings[1]);
@@ -114,6 +138,18 @@ export class FakeMarketplaces {
       return Response.json({ count: matching.length, results: matching.slice(offset, offset + limit) });
     }
     if (url.startsWith("https://pro.svc.vinted.com/")) return this.vinted(url, init);
+    if (url === "https://api.resend.com/emails") {
+      const forced = this.resendStatus.shift();
+      if (forced) return Response.json({ name: "error", message: `forced ${forced}` }, { status: forced });
+      const headers = new Headers(init?.headers);
+      if (headers.get("authorization") !== "Bearer re_test_key") return Response.json({ message: "API key is invalid" }, { status: 401 });
+      const key = headers.get("idempotency-key");
+      // Like Resend: a repeated idempotency key never sends a second email.
+      if (key && this.resendKeys.has(key)) return Response.json({ id: `email_${key}` });
+      if (key) this.resendKeys.add(key);
+      this.emails.push({ body: JSON.parse(String(init?.body)), idempotencyKey: key });
+      return Response.json({ id: `email_${this.emails.length}` });
+    }
     if (/^https:\/\/printflow-test\.myshopify\.com\/admin\/api\/[^/]+\/graphql\.json$/.test(url)) {
       const body = JSON.parse(String(init?.body ?? "{}")) as { query: string; variables: Record<string, unknown> };
       this.shopifyQueries.push(body.query);

@@ -198,6 +198,17 @@ async function main() {
     await desk.goto(`${BASE}/settings/integrations`, { waitUntil: "networkidle" });
     check("Vinted card and setup guide shown", (await desk.getByText("Vinted Pro Integrations API").count()) > 0 && (await desk.getByText("Vinted Pro setup").count()) > 0);
     check("Vinted needs its token before connecting", (await desk.getByText("VINTED_ACCESS_TOKEN").count()) > 0);
+    // Job tickets, packing slips, scan page, settings, fees on the order.
+    await desk.goto(`${BASE}/print/tickets?ids=${jobB.id}`, { waitUntil: "networkidle" });
+    check("job ticket renders with QR", (await desk.locator("[data-testid=job-ticket]").count()) === 1 && (await desk.locator("[data-testid=job-ticket] svg").count()) > 0);
+    await desk.goto(`${BASE}/print/slips?ids=${orderA.id}`, { waitUntil: "networkidle" });
+    check("packing slip renders", (await desk.locator("[data-testid=packing-slip]").count()) === 1);
+    await desk.goto(`${BASE}/scan/job/${jobB.id}`, { waitUntil: "networkidle" });
+    check("scan page offers next steps", (await desk.getByText("Scanned job ticket").count()) > 0 && (await desk.getByRole("button", {}).count()) + (await desk.getByRole("link", { name: /printer|Pack|board/i }).count()) > 0);
+    await desk.goto(`${BASE}/settings`, { waitUntil: "networkidle" });
+    check("packing slip and alert settings shown", (await desk.getByText("New-order emails").count()) > 0 && (await desk.getByRole("button", { name: "Save packing slips" }).count()) === 1);
+    await desk.goto(`${BASE}/orders/${orderA.id}`, { waitUntil: "networkidle" });
+    check("order shows marketplace fees status", (await desk.locator("[data-testid=order-fees]").count()) === 1);
     check("no runtime errors during desktop flows", errors.length === 0, errors.slice(0, 3).join(" | "));
 
     // ---------- Mobile ----------
@@ -207,7 +218,7 @@ async function main() {
     mob.on("pageerror", (e) => mErrors.push(e.message ?? String(e)));
     await login(mob);
     await sweep(mob, "mobile", mErrors);
-    for (const path of [`/orders/${orderA.id}`, "/settings/integrations"]) {
+    for (const path of [`/orders/${orderA.id}`, "/settings/integrations", "/settings", `/scan/job/${jobB.id}`]) {
       await mob.goto(`${BASE}${path}`, { waitUntil: "networkidle" });
       const { sw, vw } = await mob.evaluate(() => ({ sw: document.documentElement.scrollWidth, vw: window.innerWidth }));
       check(`mobile ${path} fits`, sw <= vw + 1, `${sw}/${vw}`);

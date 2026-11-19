@@ -145,6 +145,7 @@ export async function getOrder(id: string) {
            estimated_print_minutes, material, colour, notes, cancelled_at, cancellation_reason,
            quantity_printed, quantity_pending, quantity_surplus, printer:printers!production_jobs_printer_id_fkey(id, name))),
        shipments(*),
+       order_fees(id, kind, label, amount, currency, counted, external_ref),
        order_reviews(*, resolved_by_profile:profiles(full_name, email))`,
     )
     .eq("id", id)

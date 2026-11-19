@@ -26,6 +26,13 @@ export const serverEnv = {
     requestAllOrders: (process.env.SHOPIFY_REQUEST_ALL_ORDERS ?? "").toLowerCase() === "true",
   },
 
+  email: {
+    /** Resend API key (re_…) for new-order alerts. */
+    resendApiKey: (process.env.RESEND_API_KEY ?? "").trim(),
+    /** Sender. Resend's onboarding@resend.dev only delivers to your own Resend account email; verify a domain to send elsewhere. */
+    from: (process.env.ALERT_FROM_EMAIL ?? "").trim() || "PrintFlow <onboarding@resend.dev>",
+  },
+
   vinted: {
     /** The full access token from the Vinted Pro Integrations Portal: "{access key},{signing key}". */
     accessToken: (process.env.VINTED_ACCESS_TOKEN ?? "").trim(),
