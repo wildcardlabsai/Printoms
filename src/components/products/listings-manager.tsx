@@ -12,7 +12,7 @@ import { addListingAction, removeListingAction } from "@/lib/actions/products";
 
 type Listing = {
   id: string;
-  source: "etsy" | "shopify";
+  source: "etsy" | "shopify" | "vinted";
   external_listing_id: string;
   external_variant_id: string | null;
   external_sku: string | null;
@@ -24,7 +24,7 @@ export function ListingsManager({ productId, listings, canEdit }: { productId: s
   const toast = useToast();
   const router = useRouter();
   const [open, setOpen] = React.useState(false);
-  const [source, setSource] = React.useState<"etsy" | "shopify">("etsy");
+  const [source, setSource] = React.useState<"etsy" | "shopify" | "vinted">("etsy");
   const [listingId, setListingId] = React.useState("");
   const [variantId, setVariantId] = React.useState("");
   const [sku, setSku] = React.useState("");
@@ -96,9 +96,10 @@ export function ListingsManager({ productId, listings, canEdit }: { productId: s
           <DialogBody>
             <FormError message={error} />
             <Field label="Marketplace" htmlFor="l-source">
-              <Select id="l-source" value={source} onChange={(e) => setSource(e.target.value as "etsy" | "shopify")}>
+              <Select id="l-source" value={source} onChange={(e) => setSource(e.target.value as "etsy" | "shopify" | "vinted")}>
                 <option value="etsy">Etsy</option>
                 <option value="shopify">Shopify</option>
+                <option value="vinted">Vinted (item ID)</option>
               </Select>
             </Field>
             <Field

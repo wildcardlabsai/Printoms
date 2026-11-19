@@ -7,6 +7,8 @@ import { createClient } from "@/lib/supabase/server";
 import { dbErrorMessage, fail, ok, type ActionResult } from "@/lib/action-result";
 import { listingSchema, productSchema, type ProductInput } from "@/lib/validation/products";
 import { uuid } from "@/lib/validation/common";
+import { hasServiceRole } from "@/lib/server-env";
+import { previewProductImport, runProductImport, type ImportPreview, type ImportSummary } from "@/lib/integrations/product-import";
 
 function handle(e: unknown): ActionResult<never> {
   if (e instanceof AuthorisationError) return fail(e.message);
@@ -107,5 +109,61 @@ export async function deleteProductAction(id: string): Promise<ActionResult> {
     return ok(undefined, "Product deleted");
   } catch (e) {
     return handle(e);
+  }
+}
+
+const importProvider = z.enum(["etsy", "shopify"]);
+const importDecisions = z
+  .array(
+    z.object({
+      external_listing_id: z.string().trim().min(1).max(200),
+      action: z.enum(["keep", "link", "create", "skip"]),
+      product_id: uuid.nullable(),
+    }),
+  )
+  .max(5000);
+
+function importError(e: unknown): ActionResult<never> {
+  if (e instanceof AuthorisationError) return fail(e.message);
+  if (e instanceof z.ZodError) return fail(e.issues[0]?.message ?? "Invalid input");
+  const message = e instanceof Error ? e.message : String(e);
+  if (/401|403|reconnect|not connected|access token/i.test(message)) {
+    return fail(`${message} Check the connection in Settings → Integrations.`);
+  }
+  return fail(`Couldn’t read listings from the marketplace: ${message}`);
+}
+
+/** Read the marketplace's listings and propose how each maps to a product. Nothing is saved. */
+export async function previewProductImportAction(provider: string): Promise<ActionResult<ImportPreview>> {
+  try {
+    await authoriseAction("admin");
+    if (!hasServiceRole()) return fail("SUPABASE_SECRET_KEY is required to read marketplace listings.");
+    const supabase = await createClient();
+    return ok(await previewProductImport(supabase, importProvider.parse(provider)));
+  } catch (e) {
+    return importError(e);
+  }
+}
+
+/** Apply the reviewed import. Safe to repeat: linked listings are never duplicated. */
+export async function importProductsAction(provider: string, decisions: unknown): Promise<ActionResult<ImportSummary>> {
+  try {
+    await authoriseAction("admin");
+    if (!hasServiceRole()) return fail("SUPABASE_SECRET_KEY is required to read marketplace listings.");
+    const p = importProvider.parse(provider);
+    const supabase = await createClient();
+    const summary = await runProductImport(supabase, p, importDecisions.parse(decisions));
+    revalidatePath("/products");
+    revalidatePath("/orders");
+    revalidatePath("/production");
+    const parts = [
+      summary.created && `${summary.created} created`,
+      summary.linked && `${summary.linked} linked to existing products`,
+      summary.already_linked && `${summary.already_linked} already linked`,
+      summary.order_lines_linked && `${summary.order_lines_linked} order line(s) matched`,
+    ].filter(Boolean);
+    return ok(summary, parts.length ? `Import complete: ${parts.join(" · ")}` : "Nothing to import");
+  } catch (e) {
+    return importError(e);
   }
 }

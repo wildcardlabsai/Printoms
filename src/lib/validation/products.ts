@@ -30,7 +30,7 @@ export type ProductInput = z.input<typeof productSchema>;
 export const listingSchema = z
   .object({
     product_id: z.uuid(),
-    source: z.enum(["etsy", "shopify"]),
+    source: z.enum(["etsy", "shopify", "vinted"]),
     external_listing_id: z.string().trim().min(1, "Listing ID is required").max(200),
     external_variant_id: optionalText(200),
     external_sku: optionalText(120),

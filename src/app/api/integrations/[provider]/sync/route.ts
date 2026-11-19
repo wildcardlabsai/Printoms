@@ -10,7 +10,7 @@ export const maxDuration = 300;
 /** Manual "Sync now" — admins only. */
 export async function POST(_request: NextRequest, { params }: { params: Promise<{ provider: string }> }) {
   const { provider } = await params;
-  if (provider !== "etsy" && provider !== "shopify") {
+  if (provider !== "etsy" && provider !== "shopify" && provider !== "vinted") {
     return NextResponse.json({ ok: false, error: "Unknown marketplace" }, { status: 404 });
   }
   try {

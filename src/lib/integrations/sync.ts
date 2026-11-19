@@ -51,8 +51,8 @@ export const FAILURE_CURSOR_HOLD_ATTEMPTS = 3;
 /** Stored failures retried per run (those not already re-fetched). */
 export const STORED_RETRY_BATCH = 50;
 
-const LABEL: Record<IntegrationProvider, string> = { etsy: "Etsy sync", shopify: "Shopify sync" };
-const NAME: Record<IntegrationProvider, string> = { etsy: "Etsy", shopify: "Shopify" };
+const LABEL: Record<IntegrationProvider, string> = { etsy: "Etsy sync", shopify: "Shopify sync", vinted: "Vinted sync" };
+const NAME: Record<IntegrationProvider, string> = { etsy: "Etsy", shopify: "Shopify", vinted: "Vinted" };
 
 function describeError(e: unknown) {
   if (e instanceof IntegrationError) return { message: e.message, details: e.details ?? null };
@@ -244,6 +244,7 @@ async function runSyncUnsafe(
 
     for await (const page of adapter.fetchOrders({
       since,
+      resync,
       defaultDispatchDays: settings?.default_dispatch_days ?? 3,
       onPage: (n) => (counters.pages = n),
       onWarning: (w) => {
@@ -471,7 +472,7 @@ export async function runScheduledSync(provider: IntegrationProvider): Promise<S
  * starve the other. Prefer the per-marketplace endpoints for scheduling.
  */
 export async function runDueSyncs(): Promise<SyncResult[]> {
-  const providers: IntegrationProvider[] = ["etsy", "shopify"];
+  const providers: IntegrationProvider[] = ["etsy", "shopify", "vinted"];
   const settled = await Promise.allSettled(providers.map((p) => runScheduledSync(p)));
   return settled.map((r, i) =>
     r.status === "fulfilled" ? r.value : { provider: providers[i]!, status: "failed" as const, message: String(r.reason) },

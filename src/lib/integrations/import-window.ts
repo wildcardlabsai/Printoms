@@ -20,7 +20,7 @@ export function hasAllOrdersScope(scopes: readonly string[] | null | undefined) 
 }
 
 export function maxImportDays(provider: IntegrationProvider, scopes: readonly string[] | null | undefined): number {
-  if (provider === "etsy") return MAX_HISTORY_DAYS;
+  if (provider !== "shopify") return MAX_HISTORY_DAYS;
   return hasAllOrdersScope(scopes) ? MAX_HISTORY_DAYS : SHOPIFY_DEFAULT_HISTORY_DAYS;
 }
 

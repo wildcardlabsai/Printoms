@@ -54,6 +54,7 @@ export async function pushShipmentToMarketplace(shipmentId: string, userId: stri
   const order = shipment.order;
   if (order.is_sample) return reject("Sample orders are never sent to a marketplace.");
   if (order.source === "manual" || !order.external_order_id) return reject("Manual orders have no marketplace to update.");
+  if (order.source === "vinted") return reject("Vinted tracks the parcel from its own shipping label — there is nothing to send back.");
   if (shipment.status !== "dispatched" || !["dispatched", "completed"].includes(order.status)) {
     return reject("Only orders that have actually been dispatched can be sent to the marketplace.");
   }

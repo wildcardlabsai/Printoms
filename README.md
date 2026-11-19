@@ -1,6 +1,6 @@
 # PrintFlow
 
-PrintFlow is a private operating system for a 3D printing business. It brings **Etsy** and **Shopify** orders into one place and runs each item through production, printing, quality control, packing and dispatch.
+PrintFlow is a private operating system for a 3D printing business. It brings **Etsy**, **Shopify** and **Vinted Pro** orders into one place and runs each item through production, printing, quality control, packing and dispatch.
 
 It's a working, database-backed application, not a set of mock screens. Every figure comes from your Supabase database, and marketplace connections only show as connected once you've supplied real credentials.
 
@@ -29,11 +29,11 @@ It's a working, database-backed application, not a set of mock screens. Every fi
 | Module | What it does |
 | --- | --- |
 | **Overview** | Live KPIs (new today, awaiting production, printing, ready to pack, awaiting dispatch, overdue, sales by channel), a 30-day sales chart, source breakdown, production queue, deadlines, printer availability and recent activity. |
-| **All Orders** | Unified Etsy, Shopify and manual orders, with search, view tabs, filters, sorting and pagination. Order detail shows per-item production status, personalisation, customer notes, internal notes, editable priority and deadline, a full history timeline, and hold/cancel/complete actions. Includes a manual order form. |
+| **All Orders** | Unified Etsy, Shopify, Vinted Pro and manual orders, with search, view tabs, filters, sorting and pagination. Order detail shows per-item production status, personalisation, customer notes, internal notes, editable priority and deadline, a full history timeline, and hold/cancel/complete actions. Includes a manual order form. |
 | **Production Board** | Kanban with nine stages and drag-and-drop (mouse, touch and keyboard). Each order item is its own job. Moving a card into *Printing* starts a tracked print run, and moving it out records the outcome. On mobile it becomes a stage picker with a "Move to…" menu. Every job tracks its **physical units**, so a 5-item job shows how many units are printed, printing, passed and outstanding. Plates can print some of the units, partial failures re-queue only the failed units, and a job can't move to packing with units unprinted unless you confirm. |
 | **Print Farm** | Bambu Lab A1, Flashforge AD5X and Flashforge Adventurer 5M come pre-registered. Each printer has status, its current job with elapsed time against the estimate, a per-printer queue, a maintenance log, print history and a failure log. Failed prints are re-queued for the **same job**, so the order is never duplicated. |
 | **Packing & Dispatch** | Ready-to-pack orders, a configurable packing checklist, delivery details, items and quantities with personalisation, carrier/tracking/postage capture, and dispatch history. You can send tracking back to Etsy or Shopify. |
-| **Products** | Catalogue with SKU, images (Supabase Storage), category, STL/3MF reference, print time, material, filament estimate, default printer, instructions and costs. Each product can have **multiple marketplace listings**, kept separately per marketplace, plus an estimated unit cost and margin. |
+| **Products** | Catalogue with SKU, images (Supabase Storage), category, STL/3MF reference, print time, material, filament estimate, default printer, instructions and costs. Each product can have **multiple marketplace listings**, kept separately per marketplace, plus an estimated unit cost and margin. **Import from marketplace** (admins) brings Etsy listings and Shopify products in without duplicates: already-linked listings are only refreshed, a matching SKU links to the existing product, similar names are suggested for you to confirm, and you review every row before anything is saved. Existing product details are never overwritten (only blank fields are filled), images are copied into storage, and earlier order lines for the listing are linked. Running it again changes nothing. |
 | **Filament Inventory** | Spools with brand, material, colour, weight, remaining, price, supplier, purchase date and low-stock threshold. Every stock change is a ledger entry. **Nothing is deducted until consumption is recorded or confirmed.** |
 | **Customers** | Unified customers, matched by marketplace customer ID or exact email and **never by name**. Shows addresses, order history, spend and notes, plus a deliberate, atomic "merge duplicates" tool. |
 | **Analytics** | Date-range presets or a custom range, with comparison to the previous period. Covers net revenue by channel, AOV, monthly comparison, daily volume, best sellers, production times and failure rate, fulfilment turnaround, and recorded filament costs. Revenue, costs and **estimated** profit are shown separately, with the assumptions spelled out. |
@@ -85,6 +85,8 @@ See `.env.example` for the full list.
 | `SHOPIFY_ADMIN_ACCESS_TOKEN` | **server only** | Alternative: an existing Admin API token |
 | `SHOPIFY_API_VERSION` | server | Defaults to `2025-10` |
 | `SHOPIFY_REQUEST_ALL_ORDERS` | server | `true` to also request `read_all_orders` (order history older than 60 days). Off by default. |
+| `VINTED_ACCESS_TOKEN` | **server only** | Vinted Pro Integrations access token exactly as generated in the portal: `access-key,signing-key` |
+| `VINTED_ENVIRONMENT` | server | `production` (default) or `sandbox` for Vinted's dev-mode environment |
 
 No marketplace secret uses the `NEXT_PUBLIC_` prefix. All server modules that read secrets import `server-only`, so the build fails if one is accidentally imported into browser code.
 
@@ -106,10 +108,13 @@ The migrations live in `supabase/migrations/`:
 | `…20261119000002_production_units.sql` | Phase 2: `production_units` (one row per physical item) and `print_run_units`, per-job unit counters, partial-plate `start_print_run`/`finish_print_run`, `record_qc_failure`. Backfills units for existing jobs from their stage and history. Additive only. |
 | `…20261119000003_order_reconciliation.sql` | Phase 2: `order_reviews` (marketplace changes needing a decision), `orders.requires_review`, line-item status columns, `apply_order_cancellation`, `reopen_cancelled_order`, `resolve_order_review`, the `assert_order_shippable` guard on pack/dispatch, and the reconciling `ingest_marketplace_order`. Additive only. |
 | `…20261119000004_fulfilment_and_failures.sql` | Phase 2: `fulfilment_submissions` (every tracking submission, one in flight per shipment), `sync_failure_events` (failure audit history), dismiss/reopen for failed orders. Additive only. |
+| `…20261120000001_product_import.sql` | `import_marketplace_listing`: applies one reviewed product-import decision atomically (per-listing lock; never duplicates; fills only blank product fields; links unmapped order lines). |
+| `…20261120000002_vinted_enums.sql` | Adds `vinted` to `order_source` and `integration_provider` (on its own, because a new enum value can't be used in the same transaction). |
+| `…20261120000003_vinted.sql` | The Vinted integration row and Vinted figures in the dashboard and analytics functions. |
 
 **Hosted Supabase:**
 
-*No command line:* for a **new, empty** project, open Supabase → SQL Editor → New query, paste the whole of `supabase/setup/printflow_full_setup.sql` and click **Run** (once). It applies all migrations in one transaction (all or nothing) and records them, so `supabase db push` works for later migrations. Regenerate it if migrations change.
+*No command line:* for a **new, empty** project, open Supabase → SQL Editor → New query, paste the whole of `supabase/setup/printflow_full_setup.sql` and click **Run** (once). It applies all migrations in one transaction (all or nothing) and records them, so `supabase db push` works for later migrations. A project set up with the earlier setup file (migrations up to `20261119000004`) runs `supabase/setup/update_20261119000004_part1.sql` and then `…_part2.sql` as two separate queries instead. Regenerate these files with `node scripts/build-setup-sql.mjs` after adding a migration.
 
 *With the CLI:*
 
@@ -133,6 +138,16 @@ Step-by-step guides are also built into **Settings → Integrations**, including
 4. Redeploy, then click **Connect Etsy**. The requested scopes are `transactions_r transactions_w listings_r shops_r email_r`.
 
 Access tokens last one hour and are refreshed automatically. Etsy rotates refresh tokens, and PrintFlow stores the new one each time. PrintFlow sends the API key as `keystring:shared_secret` in the `x-api-key` header. If your app predates that requirement and rejects it, you can leave `ETSY_SHARED_SECRET` empty to send the keystring alone.
+
+### Vinted Pro (Pro Integrations API — orders)
+
+Vinted Pro Integrations is only available to **allowlisted Vinted Pro businesses** (ask your Vinted account manager or Vinted Pro support).
+
+1. Sign in to the Vinted Pro Integrations Portal (production mode) and generate an **access token**. It is shown once and looks like `access-key,signing-key`.
+2. Set `VINTED_ACCESS_TOKEN` to the whole token (Sensitive), redeploy, and click **Connect Vinted**. The token is verified with a read-only request.
+3. Every request is signed (HMAC-SHA256 over `timestamp.METHOD.path?query.accessKey.body`, per Vinted's reference script).
+
+How it syncs: Vinted's order list gives only id, date and status, and orders have no "updated" time, so each run reads the list and fetches full details only for new orders in the import window and orders whose Vinted status changed. Cancelled on Vinted → the normal cancellation rules apply; shipped/delivered/completed → recorded as shipped outside PrintFlow. Vinted creates the shipping label and tracks the parcel, so PrintFlow **never sends tracking to Vinted**; the packing screen has **Download Vinted label (PDF)** (labels exist only for items listed through the API). Order totals are the seller payout Vinted reports, so no Vinted fee is deducted again in profit estimates. Items not listed through the API have no item ID on Vinted, so they appear as unlinked lines you can map to a product.
 
 ### Shopify (Admin GraphQL API)
 

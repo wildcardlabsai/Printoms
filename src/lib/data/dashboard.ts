@@ -13,14 +13,16 @@ export type DashboardMetrics = {
   total_sales: number;
   etsy_sales: number;
   shopify_sales: number;
+  vinted_sales?: number;
   manual_sales: number;
   etsy_orders: number;
   shopify_orders: number;
+  vinted_orders?: number;
   manual_orders: number;
   sample_orders: number;
   currently_printing: number;
   jobs_by_stage: Record<string, number>;
-  sales_30d: { date: string; etsy: number; shopify: number; manual: number; orders: number }[];
+  sales_30d: { date: string; etsy: number; shopify: number; vinted?: number; manual: number; orders: number }[];
 };
 
 export async function getDashboard() {

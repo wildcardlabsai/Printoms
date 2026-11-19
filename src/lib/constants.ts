@@ -44,6 +44,7 @@ export const PAYMENT_STATUSES = Object.keys(PAYMENT_STATUS) as PaymentStatus[];
 export const ORDER_SOURCE: Record<OrderSource, Meta & { short: string }> = {
   etsy: { label: "Etsy", short: "Etsy", tone: "orange" },
   shopify: { label: "Shopify", short: "Shopify", tone: "green" },
+  vinted: { label: "Vinted", short: "Vinted", tone: "sky" },
   manual: { label: "Manual", short: "Manual", tone: "slate" },
 };
 

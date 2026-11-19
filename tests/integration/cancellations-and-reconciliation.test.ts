@@ -358,7 +358,7 @@ describe("customer changes and line-item reconciliation", () => {
     await ingestShop(node(0, "2026-11-18T10:00:00Z"));
     const { data: items } = await db.from("order_items").select("external_line_item_id, marketplace_status").eq("order_id", (await orderBy(`gid://shopify/Order/${PREFIX}9`)).id).order("external_line_item_id");
     assert.deepEqual(items!.map((i) => i.marketplace_status), ["active", "removed"]);
-    await db.from("orders").delete().eq("external_order_id", `gid://shopify/Order/${PREFIX}9`);
+    await cleanupTestOrders(`gid://shopify/Order/${PREFIX}9`); // also removes its placeholder customer
   });
 
   it("history is preserved: no print run was removed by any change above", () => {

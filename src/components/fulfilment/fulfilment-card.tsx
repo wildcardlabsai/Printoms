@@ -3,7 +3,7 @@
 import * as React from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { CalendarClock, ChevronDown, MapPin, PackageCheck, Send, Sparkles, Truck } from "lucide-react";
+import { CalendarClock, ChevronDown, FileDown, MapPin, PackageCheck, Send, Sparkles, Truck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { SampleBadge, Badge } from "@/components/ui/badge";
@@ -68,7 +68,7 @@ export function FulfilmentCard({
   const overdue = isOverdue(order.dispatch_by, order.status);
   const dispatched = order.status === "dispatched" || order.status === "completed";
   const canPush =
-    shipment && dispatched && !order.is_sample && Boolean(shipment.tracking_number) && order.source !== "manual" &&
+    shipment && dispatched && !order.is_sample && Boolean(shipment.tracking_number) && order.source !== "manual" && order.source !== "vinted" &&
     connected.includes(order.source) && shipment.marketplace_push_status !== "sent";
 
   const act = (fn: () => Promise<{ ok: boolean; error?: string; message?: string }>, after?: () => void) =>
@@ -115,6 +115,19 @@ export function FulfilmentCard({
       {open ? (
         <div className="grid gap-5 border-t border-line bg-subtle/40 px-4 py-4 sm:px-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
           <div className="space-y-4">
+            {order.source === "vinted" && !order.is_sample ? (
+              <div className="rounded-xl border border-line bg-surface p-3 text-sm text-ink-2">
+                <p>Vinted provides the shipping label and tracks the parcel — nothing needs to be sent back.</p>
+                <a
+                  href={`/api/integrations/vinted/orders/${order.id}/label`}
+                  target="_blank"
+                  rel="noopener"
+                  className="mt-2 inline-flex items-center gap-1.5 text-sm font-medium text-brand-700 hover:underline"
+                >
+                  <FileDown className="size-4" /> Download Vinted label (PDF)
+                </a>
+              </div>
+            ) : null}
             <div>
               <p className="mb-2 text-[13px] font-semibold text-ink">Items to pack</p>
               <ul className="space-y-2">
@@ -211,7 +224,7 @@ export function FulfilmentCard({
                   <Button size="sm" variant="outline" loading={pending} onClick={() => act(() => pushShipmentAction(shipment.id))}>
                     <Send /> {shipment.marketplace_push_status === "failed" ? "Retry sending tracking" : `Send tracking to ${order.source === "etsy" ? "Etsy" : "Shopify"}`}
                   </Button>
-                ) : shipment.marketplace_push_status === "pending" && order.source !== "manual" ? (
+                ) : shipment.marketplace_push_status === "pending" && order.source !== "manual" && order.source !== "vinted" ? (
                   <p className="text-xs text-muted">Connect {order.source === "etsy" ? "Etsy" : "Shopify"} to send tracking automatically, or mark it shipped on the marketplace.</p>
                 ) : null}
               </div>

@@ -17,6 +17,12 @@ export function checkConfig(provider: IntegrationProvider): ConfigCheck {
     return { ready: missing.length === 0, missing, mode: "OAuth 2.0 (PKCE)" };
   }
 
+  if (provider === "vinted") {
+    if (!serverEnv.vinted.accessToken) missing.push("VINTED_ACCESS_TOKEN");
+    else if (!/^[^,\s]+,[^,\s]+$/.test(serverEnv.vinted.accessToken)) missing.push("VINTED_ACCESS_TOKEN (must be the full token: access key, comma, signing key)");
+    return { ready: missing.length === 0, missing, mode: `Access token (${serverEnv.vinted.environment === "sandbox" ? "dev mode" : "production"})` };
+  }
+
   if (!serverEnv.shopify.storeDomain) missing.push("SHOPIFY_STORE_DOMAIN");
   else if (!/^[a-z0-9][a-z0-9-]*\.myshopify\.com$/i.test(serverEnv.shopify.storeDomain)) {
     missing.push("SHOPIFY_STORE_DOMAIN (must be your-store.myshopify.com)");

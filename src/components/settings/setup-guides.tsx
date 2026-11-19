@@ -58,3 +58,26 @@ export function ShopifySetupGuide({ redirectUri, store }: { redirectUri: string;
     </ol>
   );
 }
+
+export function VintedSetupGuide() {
+  return (
+    <ol className="space-y-4">
+      <Step n={1}>
+        Vinted Pro Integrations is only open to <strong>allowlisted Vinted Pro businesses</strong>. If you can’t sign in at{" "}
+        <a className="font-medium text-brand-700 hover:underline" href="https://pro-portal.svc.vinted.com" target="_blank" rel="noopener noreferrer">pro-portal.svc.vinted.com</a>, ask your Vinted account manager or Vinted Pro support for API access.
+      </Step>
+      <Step n={2}>
+        In the Pro Integrations Portal, make sure you are in <strong>production</strong> mode (not dev mode) and <strong>generate an access token</strong>. It is only shown once — copy all of it. It looks like <span className={code}>access-key,signing-key</span>.
+      </Step>
+      <Step n={3}>
+        Paste the whole token, comma included, into <span className={code}>VINTED_ACCESS_TOKEN</span> (mark it Sensitive). Only for testing against Vinted’s dev-mode sandbox, also set <span className={code}>VINTED_ENVIRONMENT=sandbox</span>.
+      </Step>
+      <Step n={4}>
+        Redeploy, then click <strong>Connect Vinted</strong>. PrintFlow checks the token with a read-only request and starts importing orders from the chosen window.
+      </Step>
+      <Step n={5}>
+        Vinted creates the shipping label and tracks the parcel itself, so PrintFlow never sends tracking to Vinted. For items listed through the API, download Vinted’s label from the packing screen. Order totals are what Vinted pays you.
+      </Step>
+    </ol>
+  );
+}

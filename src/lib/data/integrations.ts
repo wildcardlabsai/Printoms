@@ -60,7 +60,7 @@ export type FailureState = "open" | "dismissed" | "resolved";
 
 type FailureRow = {
   id: string;
-  provider: "etsy" | "shopify";
+  provider: "etsy" | "shopify" | "vinted";
   external_order_id: string;
   attempts: number;
   last_error: string;

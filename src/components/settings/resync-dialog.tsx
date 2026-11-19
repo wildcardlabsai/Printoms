@@ -22,7 +22,7 @@ export function ResyncDialog({
   open,
   onOpenChange,
 }: {
-  provider: "etsy" | "shopify";
+  provider: "etsy" | "shopify" | "vinted";
   name: string;
   options: number[];
   maxDays: number;

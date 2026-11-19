@@ -27,7 +27,7 @@ jobs:
     strategy:
       fail-fast: false # one marketplace failing never stops the other
       matrix:
-        provider: [etsy, shopify]
+        provider: [etsy, shopify, vinted]
     steps:
       - name: Sync ${{ matrix.provider }}
         env:

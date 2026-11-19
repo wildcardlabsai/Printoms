@@ -6,7 +6,10 @@ PrintFlow syncs each marketplace independently. Each one has its own endpoint, r
 | --- | --- |
 | `GET /api/cron/sync/etsy` | Etsy only |
 | `GET /api/cron/sync/shopify` | Shopify only |
-| `GET /api/cron/sync` | Both, run in parallel and isolated (kept for compatibility) |
+| `GET /api/cron/sync/vinted` | Vinted Pro only |
+| `GET /api/cron/sync` | All marketplaces, run in parallel and isolated (kept for compatibility) |
+
+A marketplace that isn't connected is skipped, so scheduling an endpoint you don't use yet is harmless.
 
 Every request needs `Authorization: Bearer $CRON_SECRET`. A marketplace only syncs when its own interval is due (10 minutes by default), so calling an endpoint more often than that is harmless.
 
@@ -38,9 +41,17 @@ select cron.schedule('printflow-sync-shopify', '*/10 * * * *', $$
     timeout_milliseconds := 300000
   );
 $$);
+
+select cron.schedule('printflow-sync-vinted', '*/10 * * * *', $$
+  select net.http_get(
+    url := 'https://YOUR-DOMAIN/api/cron/sync/vinted',
+    headers := jsonb_build_object('Authorization', 'Bearer ' || (select decrypted_secret from vault.decrypted_secrets where name = 'printflow_cron_secret')),
+    timeout_milliseconds := 300000
+  );
+$$);
 ```
 
-To remove the jobs: `select cron.unschedule('printflow-sync-etsy'); select cron.unschedule('printflow-sync-shopify');`
+To remove the jobs: `select cron.unschedule('printflow-sync-etsy'); select cron.unschedule('printflow-sync-shopify'); select cron.unschedule('printflow-sync-vinted');`
 
 ## Option B — Vercel Cron (Pro plan or higher)
 
@@ -50,7 +61,8 @@ Vercel **Hobby** only allows cron jobs that run once a day, and rejects a deploy
 {
   "crons": [
     { "path": "/api/cron/sync/etsy", "schedule": "*/10 * * * *" },
-    { "path": "/api/cron/sync/shopify", "schedule": "*/10 * * * *" }
+    { "path": "/api/cron/sync/shopify", "schedule": "*/10 * * * *" },
+    { "path": "/api/cron/sync/vinted", "schedule": "*/10 * * * *" }
   ]
 }
 ```

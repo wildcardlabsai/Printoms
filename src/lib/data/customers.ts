@@ -17,7 +17,7 @@ export async function listCustomers({ q, source, sort = "recent", page = 1, page
     const term = `%${escapeLike(q.trim()).replace(/[,()]/g, " ")}%`;
     query = query.or(`display_name.ilike.${term},email.ilike.${term}`);
   }
-  if (source === "etsy" || source === "shopify" || source === "manual") query = query.contains("sources", [source]);
+  if (source === "etsy" || source === "shopify" || source === "vinted" || source === "manual") query = query.contains("sources", [source]);
   const { data, count, error } = await query
     .order(s.column, { ascending: s.ascending, nullsFirst: false })
     .order("display_name")

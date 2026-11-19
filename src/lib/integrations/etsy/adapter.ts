@@ -1,6 +1,7 @@
 import "server-only";
 import type { AdminSupabase } from "@/lib/supabase/admin";
-import type { FetchContext, FulfilmentPush, MarketplaceAdapter, OrderPage } from "../types";
+import type { FetchContext, FulfilmentPush, MarketplaceAdapter, MarketplaceListing, OrderPage } from "../types";
+import { mapEtsyListing, type EtsyListing } from "../listings";
 import { findCarrier, normaliseTracking } from "../carriers";
 import { EtsyClient } from "./client";
 import { mapEtsyReceipt, type EtsyReceipt } from "./mapper";
@@ -40,6 +41,17 @@ export class EtsyAdapter implements MarketplaceAdapter {
         null,
       );
       yield { orders, maxUpdatedAt };
+      if (data.results.length < PAGE_SIZE || (page + 1) * PAGE_SIZE >= data.count) return;
+    }
+  }
+
+  /** Active listings (getListingsByShop, read-only), 100 per page, with images. */
+  async *fetchListings(onPage?: (page: number) => void): AsyncGenerator<MarketplaceListing[]> {
+    for (let page = 0; page < 50; page++) {
+      const params = new URLSearchParams({ state: "active", limit: String(PAGE_SIZE), offset: String(page * PAGE_SIZE), includes: "Images" });
+      const data = await this.client.request<{ count: number; results: EtsyListing[] }>(`/shops/${this.shopId}/listings?${params.toString()}`);
+      onPage?.(page + 1);
+      yield data.results.map(mapEtsyListing);
       if (data.results.length < PAGE_SIZE || (page + 1) * PAGE_SIZE >= data.count) return;
     }
   }

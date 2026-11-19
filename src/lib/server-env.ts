@@ -25,6 +25,13 @@ export const serverEnv = {
     /** Opt-in: also request read_all_orders (orders older than 60 days). Shopify may require approval. */
     requestAllOrders: (process.env.SHOPIFY_REQUEST_ALL_ORDERS ?? "").toLowerCase() === "true",
   },
+
+  vinted: {
+    /** The full access token from the Vinted Pro Integrations Portal: "{access key},{signing key}". */
+    accessToken: (process.env.VINTED_ACCESS_TOKEN ?? "").trim(),
+    /** "production" (default) or "sandbox" (Vinted's dev-mode environment). */
+    environment: ((process.env.VINTED_ENVIRONMENT ?? "production").trim().toLowerCase() === "sandbox" ? "sandbox" : "production") as "production" | "sandbox",
+  },
 };
 
 export function hasServiceRole(): boolean {

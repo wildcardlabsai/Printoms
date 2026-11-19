@@ -18,7 +18,7 @@ export const maxDuration = 300;
  */
 export async function POST(request: NextRequest, { params }: { params: Promise<{ provider: string }> }) {
   const { provider } = await params;
-  if (provider !== "etsy" && provider !== "shopify") {
+  if (provider !== "etsy" && provider !== "shopify" && provider !== "vinted") {
     return NextResponse.json({ ok: false, error: "Unknown marketplace" }, { status: 404 });
   }
   try {

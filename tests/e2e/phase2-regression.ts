@@ -190,6 +190,14 @@ async function main() {
     check("reopened", reopened.dismissed_at === null);
     const events = (await db.from("sync_failure_events").select("event").eq("failure_id", (await db.from("sync_failures").select("id").eq("external_order_id", F).single()).data!.id).order("created_at")).data!.map((e) => e.event);
     check("failure history recorded", events.join(",") === "failed,retried,dismissed,reopened" || events.join(",") === "failed,dismissed,reopened", events.join(","));
+    // Product import + Vinted (no marketplace is connected on the local stack).
+    await desk.goto(`${BASE}/products`, { waitUntil: "networkidle" });
+    await desk.getByRole("button", { name: "Import from marketplace" }).click();
+    check("product import dialog opens", (await desk.getByRole("dialog", {}).getByText(/Connect Etsy or Shopify|Read your/).count()) > 0);
+    await desk.getByRole("dialog", {}).getByRole("button", { name: "Cancel" }).click();
+    await desk.goto(`${BASE}/settings/integrations`, { waitUntil: "networkidle" });
+    check("Vinted card and setup guide shown", (await desk.getByText("Vinted Pro Integrations API").count()) > 0 && (await desk.getByText("Vinted Pro setup").count()) > 0);
+    check("Vinted needs its token before connecting", (await desk.getByText("VINTED_ACCESS_TOKEN").count()) > 0);
     check("no runtime errors during desktop flows", errors.length === 0, errors.slice(0, 3).join(" | "));
 
     // ---------- Mobile ----------

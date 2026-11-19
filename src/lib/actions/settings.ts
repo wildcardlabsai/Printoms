@@ -21,7 +21,7 @@ function handle(e: unknown): ActionResult<never> {
   throw e;
 }
 
-const provider = z.enum(["etsy", "shopify"]);
+const provider = z.enum(["etsy", "shopify", "vinted"]);
 
 export async function updateBusinessSettingsAction(input: BusinessSettingsInput): Promise<ActionResult> {
   try {

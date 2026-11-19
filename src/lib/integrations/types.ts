@@ -67,12 +67,14 @@ export type FetchContext = {
   defaultDispatchDays: number;
   /** Called after each page, so the engine can record progress. */
   onPage?: (page: number) => void;
+  /** True during an administrative full resync (re-read everything in the window). */
+  resync?: boolean;
   /** Non-fatal problems worth surfacing in the sync log (e.g. restricted customer data). */
   onWarning?: (warning: SyncWarning) => void;
 };
 
 export type SyncWarning = {
-  code: "customer_data_restricted" | "import_window_limited" | "failures_parked";
+  code: "customer_data_restricted" | "import_window_limited" | "failures_parked" | "order_fetch_failed";
   message: string;
   details?: Record<string, unknown>;
 };
@@ -87,6 +89,22 @@ export type FulfilmentPush = {
 
 export type FulfilmentResult = { externalId: string | null; response: unknown };
 
+/** One marketplace listing (Etsy listing / Shopify product), for product import. */
+export type MarketplaceListing = {
+  external_listing_id: string;
+  title: string;
+  description: string | null;
+  url: string | null;
+  /** Every non-empty SKU on the listing or its variants (trimmed, de-duplicated). */
+  skus: string[];
+  price: number | null;
+  currency: string | null;
+  image_url: string | null;
+  category: string | null;
+  is_active: boolean;
+  variant_count: number;
+};
+
 export interface MarketplaceAdapter {
   provider: IntegrationProvider;
   /** Iterate pages of orders updated since `ctx.since` (oldest first where supported). */
@@ -98,6 +116,8 @@ export interface MarketplaceAdapter {
    * submission so a retry after an ambiguous outcome never creates a duplicate.
    */
   findExistingFulfilment(input: FulfilmentPush): Promise<{ externalId: string | null } | null>;
+  /** Iterate pages of the shop's listings/products (read-only). Optional per marketplace. */
+  fetchListings?(onPage?: (page: number) => void): AsyncGenerator<MarketplaceListing[]>;
 }
 
 export class IntegrationError extends Error {

@@ -10,7 +10,7 @@ import { IntegrationCard } from "@/components/settings/integration-card";
 import { SyncLogTable } from "@/components/settings/sync-log-table";
 import { SyncFailuresPanel } from "@/components/settings/sync-failures-panel";
 import { FAILURE_CURSOR_HOLD_ATTEMPTS } from "@/lib/integrations/sync";
-import { EtsySetupGuide, ShopifySetupGuide } from "@/components/settings/setup-guides";
+import { EtsySetupGuide, ShopifySetupGuide, VintedSetupGuide } from "@/components/settings/setup-guides";
 import { getIntegrationsOverview } from "@/lib/data/integrations";
 import { hasRole, requireUser } from "@/lib/auth";
 import { resolveSiteUrl } from "@/lib/server-env";
@@ -31,7 +31,7 @@ export default async function IntegrationsPage({ searchParams }: { searchParams:
       <SettingsNav active="integrations" isAdmin={hasRole(user, "admin")} />
 
       {sp.connected ? (
-        <Notice tone="success" icon={<CircleCheck />} className="mb-5" title={`${sp.connected === "etsy" ? "Etsy" : "Shopify"} connected`}>
+        <Notice tone="success" icon={<CircleCheck />} className="mb-5" title={`${sp.connected === "etsy" ? "Etsy" : sp.connected === "vinted" ? "Vinted" : "Shopify"} connected`}>
           The first import starts with the next scheduled sync, or click <strong>Sync now</strong>.
         </Notice>
       ) : null}
@@ -102,6 +102,12 @@ export default async function IntegrationsPage({ searchParams }: { searchParams:
           <CardHeader title="Shopify setup" description="Connect the Shopify Admin GraphQL API." />
           <CardContent>
             <ShopifySetupGuide redirectUri={`${origin}/api/integrations/shopify/callback`} store={overview.shopifyStore} />
+          </CardContent>
+        </Card>
+        <Card id="setup-vinted" className="min-w-0 scroll-mt-24">
+          <CardHeader title="Vinted Pro setup" description="Connect the Vinted Pro Integrations API (orders)." />
+          <CardContent>
+            <VintedSetupGuide />
           </CardContent>
         </Card>
       </div>

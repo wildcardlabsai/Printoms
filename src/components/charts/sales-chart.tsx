@@ -5,11 +5,12 @@ import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxi
 import { AXIS_TEXT, GRID, SERIES, SURFACE } from "./palette";
 import { formatCurrency } from "@/lib/utils";
 
-type Row = { label: string; etsy: number; shopify: number; manual: number };
+type Row = { label: string; etsy: number; shopify: number; vinted?: number; manual: number };
 
 const KEYS = [
   { key: "etsy", label: "Etsy" },
   { key: "shopify", label: "Shopify" },
+  { key: "vinted", label: "Vinted" },
   { key: "manual", label: "Manual" },
 ] as const;
 
@@ -58,7 +59,7 @@ export function ChartLegend({ items }: { items: { label: string; color: string; 
 
 /** Stacked daily sales by source. */
 export function SalesChart({ data, currency, height = 260 }: { data: Row[]; currency: string; height?: number }) {
-  const present = KEYS.filter((k) => data.some((d) => d[k.key] > 0));
+  const present = KEYS.filter((k) => data.some((d) => (d[k.key] ?? 0) > 0));
   const series = present.length ? present : KEYS.slice(0, 2);
   const topKey = series[series.length - 1]!.key;
   return (

@@ -10,6 +10,8 @@ import { SampleBadge, Badge } from "@/components/ui/badge";
 import { TabNav } from "@/components/ui/misc";
 import { SourceBadge } from "@/components/ui/status-badges";
 import { ProductSearch } from "./product-search";
+import { ImportProductsDialog } from "@/components/products/import-products-dialog";
+import { createClient } from "@/lib/supabase/server";
 import { getProductCategories, listProducts, signedImageUrls } from "@/lib/data/products";
 import { getBusinessSettings } from "@/lib/data/settings";
 import { hasRole, requireUser } from "@/lib/auth";
@@ -27,6 +29,12 @@ export default async function ProductsPage({ searchParams }: { searchParams: Pro
     getBusinessSettings(),
   ]);
   const images = await signedImageUrls(products.map((p) => p.image_path));
+  const isAdmin = hasRole(user, "admin");
+  const importable = isAdmin
+    ? ((await (await createClient()).from("integrations").select("provider, status")).data ?? [])
+        .filter((i) => (i.provider === "etsy" || i.provider === "shopify") && (i.status === "connected" || i.status === "error"))
+        .map((i) => i.provider as "etsy" | "shopify")
+    : [];
   const currency = settings?.currency ?? "GBP";
   const qs = (s: string) => {
     const p = new URLSearchParams();
@@ -41,7 +49,14 @@ export default async function ProductsPage({ searchParams }: { searchParams: Pro
       <PageHeader
         title="Products"
         description="Your catalogue — print settings, costs and the marketplace listings each product sells through."
-        actions={hasRole(user, "staff") ? <ButtonLink href="/products/new"><Plus /> New product</ButtonLink> : null}
+        actions={
+          hasRole(user, "staff") ? (
+            <div className="flex flex-wrap gap-2">
+              {isAdmin ? <ImportProductsDialog providers={importable} /> : null}
+              <ButtonLink href="/products/new"><Plus /> New product</ButtonLink>
+            </div>
+          ) : null
+        }
       />
       <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-center">
         <TabNav

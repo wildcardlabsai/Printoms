@@ -75,6 +75,7 @@ export function SourceBadge({ source, compact, className }: { source: OrderSourc
   const glyph = {
     etsy: "bg-orange-500 text-white",
     shopify: "bg-brand-600 text-white",
+    vinted: "bg-[#c2479b] text-white",
     manual: "bg-zinc-500 text-white",
   }[source];
   return (

@@ -38,6 +38,7 @@ export function CustomerFilters() {
           <option value="">All channels</option>
           <option value="etsy">Etsy</option>
           <option value="shopify">Shopify</option>
+          <option value="vinted">Vinted</option>
           <option value="manual">Manual</option>
         </Select>
         <Select value={params.get("sort") ?? "recent"} onChange={(e) => update({ sort: e.target.value === "recent" ? null : e.target.value })} aria-label="Sort" className="sm:w-48">

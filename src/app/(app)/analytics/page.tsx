@@ -23,6 +23,7 @@ type Summary = {
   net_revenue: number;
   etsy_revenue: number;
   shopify_revenue: number;
+  vinted_revenue?: number;
   manual_revenue: number;
   average_order_value: number;
   est_marketplace_fees: number;
@@ -37,7 +38,7 @@ type Summary = {
 type Report = {
   current: Summary;
   previous: Summary;
-  monthly: { month: string; orders: number; etsy: number; shopify: number; manual: number; net_revenue: number }[];
+  monthly: { month: string; orders: number; etsy: number; shopify: number; vinted?: number; manual: number; net_revenue: number }[];
   daily: { date: string; orders: number; revenue: number }[];
   best_sellers: { product_id: string | null; name: string; sku: string | null; mapped: boolean; units: number; revenue: number; orders: number }[];
   production: { print_runs: number; succeeded: number; failed: number; failure_rate: number; avg_print_minutes: number; total_print_hours: number };
@@ -132,11 +133,12 @@ export default async function AnalyticsPage({ searchParams }: { searchParams: Pr
               <Kpi label="Average order value" value={money(c.average_order_value)} delta={<Delta current={c.average_order_value} previous={p.average_order_value} />} />
               <Kpi label="Estimated profit" tag="Estimate" value={money(c.est_profit)} delta={<Delta current={c.est_profit} previous={p.est_profit} />} sub={`${margin.toFixed(0)}% estimated margin`} />
             </div>
-            <div className="grid grid-cols-3 gap-3">
+            <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
               {(
                 [
                   ["etsy", "Etsy revenue", c.etsy_revenue, p.etsy_revenue],
                   ["shopify", "Shopify revenue", c.shopify_revenue, p.shopify_revenue],
+                  ["vinted", "Vinted revenue", c.vinted_revenue ?? 0, p.vinted_revenue ?? 0],
                   ["manual", "Manual revenue", c.manual_revenue, p.manual_revenue],
                 ] as const
               ).map(([k, label, v, prev]) => (
@@ -157,7 +159,7 @@ export default async function AnalyticsPage({ searchParams }: { searchParams: Pr
               <CardContent>
                 <SalesChart
                   currency={currency}
-                  data={r.monthly.map((m) => ({ label: monthLabel(m.month), etsy: Number(m.etsy), shopify: Number(m.shopify), manual: Number(m.manual) }))}
+                  data={r.monthly.map((m) => ({ label: monthLabel(m.month), etsy: Number(m.etsy), shopify: Number(m.shopify), vinted: Number(m.vinted ?? 0), manual: Number(m.manual) }))}
                 />
               </CardContent>
             </Card>

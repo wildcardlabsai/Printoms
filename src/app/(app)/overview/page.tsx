@@ -56,9 +56,10 @@ export default async function OverviewPage({ searchParams }: { searchParams: Pro
     label: formatShortDate(d.date),
     etsy: Number(d.etsy),
     shopify: Number(d.shopify),
+    vinted: Number(d.vinted ?? 0),
     manual: Number(d.manual),
   }));
-  const sales30 = salesData.reduce((s, d) => s + d.etsy + d.shopify + d.manual, 0);
+  const sales30 = salesData.reduce((s, d) => s + d.etsy + d.shopify + d.vinted + d.manual, 0);
   const activeJobs = PRODUCTION_STAGES.filter((s) => !["dispatched", "completed"].includes(s.id));
   const maxStage = Math.max(1, ...activeJobs.map((s) => m.jobs_by_stage[s.id] ?? 0));
 
@@ -141,6 +142,7 @@ export default async function OverviewPage({ searchParams }: { searchParams: Pro
               rows={[
                 { key: "etsy", label: "Etsy", revenue: Number(m.etsy_sales), orders: m.etsy_orders },
                 { key: "shopify", label: "Shopify", revenue: Number(m.shopify_sales), orders: m.shopify_orders },
+                { key: "vinted", label: "Vinted", revenue: Number(m.vinted_sales ?? 0), orders: m.vinted_orders ?? 0 },
                 { key: "manual", label: "Manual", revenue: Number(m.manual_sales), orders: m.manual_orders },
               ]}
             />

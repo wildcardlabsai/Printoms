@@ -1,5 +1,6 @@
 import "server-only";
-import type { FetchContext, FulfilmentPush, MarketplaceAdapter, OrderPage } from "../types";
+import type { FetchContext, FulfilmentPush, MarketplaceAdapter, MarketplaceListing, OrderPage } from "../types";
+import { mapShopifyProduct, type ShopifyProductNode } from "../listings";
 import { IntegrationError } from "../types";
 import { ShopifyClient } from "./client";
 import { mapShopifyOrder, type ShopifyOrderNode } from "./mapper";
@@ -49,6 +50,20 @@ export const ORDERS_QUERY_RESTRICTED = ordersQuery(false);
 
 type OrdersData = { orders: { pageInfo: { hasNextPage: boolean; endCursor: string | null }; nodes: ShopifyOrderNode[] } | null };
 
+export const PRODUCTS_QUERY = /* GraphQL */ `
+  query PrintFlowProducts($first: Int!, $after: String) {
+    products(first: $first, after: $after, sortKey: ID) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        id title status descriptionHtml productType onlineStoreUrl
+        featuredMedia { preview { image { url } } }
+        priceRangeV2 { minVariantPrice { amount currencyCode } }
+        variants(first: 100) { nodes { sku } }
+      }
+    }
+  }
+`;
+
 const FULFILLMENT_ORDERS_QUERY = /* GraphQL */ `
   query PrintFlowFulfillmentOrders($id: ID!) {
     order(id: $id) {
@@ -83,6 +98,19 @@ export class ShopifyAdapter implements MarketplaceAdapter {
 
   constructor(shop: string, accessToken: string) {
     this.client = new ShopifyClient(shop, accessToken);
+  }
+
+  /** All products (read_products), 50 per page. */
+  async *fetchListings(onPage?: (page: number) => void): AsyncGenerator<MarketplaceListing[]> {
+    let after: string | null = null;
+    for (let page = 0; page < 200; page++) {
+      const data: { products: { pageInfo: { hasNextPage: boolean; endCursor: string | null }; nodes: ShopifyProductNode[] } } =
+        await this.client.graphql(PRODUCTS_QUERY, { first: 50, after });
+      onPage?.(page + 1);
+      yield data.products.nodes.map(mapShopifyProduct);
+      if (!data.products.pageInfo.hasNextPage || !data.products.pageInfo.endCursor) return;
+      after = data.products.pageInfo.endCursor;
+    }
   }
 
   /**

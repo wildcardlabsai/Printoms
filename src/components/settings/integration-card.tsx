@@ -20,6 +20,7 @@ type Integration = IntegrationOverview["integrations"][number];
 const BRAND = {
   etsy: { name: "Etsy", api: "Etsy Open API v3", glyph: "bg-orange-500", letter: "E" },
   shopify: { name: "Shopify", api: "Shopify Admin GraphQL API", glyph: "bg-brand-600", letter: "S" },
+  vinted: { name: "Vinted", api: "Vinted Pro Integrations API", glyph: "bg-[#c2479b]", letter: "V" },
 } as const;
 
 export function IntegrationCard({ integration, canManage }: { integration: Integration; canManage: boolean }) {
