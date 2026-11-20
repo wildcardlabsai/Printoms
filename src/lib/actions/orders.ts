@@ -7,6 +7,11 @@ import { createClient } from "@/lib/supabase/server";
 import { dbErrorMessage, fail, ok, type ActionResult } from "@/lib/action-result";
 import { manualOrderSchema, orderInternalSchema, orderItemMappingSchema, type ManualOrderInput } from "@/lib/validation/orders";
 import { uuid } from "@/lib/validation/common";
+import { createAdminClient } from "@/lib/supabase/admin";
+import { hasServiceRole } from "@/lib/server-env";
+import { vintedSaleSchema, type VintedSaleInput } from "@/lib/validation/vinted-sale";
+import { buildVintedSale, vintedSaleExternalId } from "@/lib/integrations/vinted/manual-sale";
+import type { Json } from "@/types/database";
 
 function handle(e: unknown): ActionResult<never> {
   if (e instanceof AuthorisationError) return fail(e.message);
@@ -233,6 +238,49 @@ export async function updateOrderItemAction(input: z.input<typeof orderItemMappi
     }
     revalidateOrder(item.order_id);
     return ok(undefined, "Item updated");
+  } catch (e) {
+    return handle(e);
+  }
+}
+
+/**
+ * Add a Vinted sale typed in from the Vinted app. It goes through the same
+ * idempotent import as marketplace orders (source "vinted"), so it gets
+ * production jobs, a customer and Vinted figures. The form's key makes a
+ * repeated submit harmless; a Vinted reference can only be used once.
+ */
+export async function addVintedSaleAction(input: VintedSaleInput): Promise<ActionResult<{ id: string }>> {
+  try {
+    const user = await authoriseAction("staff");
+    if (!hasServiceRole()) return fail("SUPABASE_SECRET_KEY is required to add Vinted sales.");
+    const parsed = vintedSaleSchema.safeParse(input);
+    if (!parsed.success) return fail("Please check the highlighted fields", z.flattenError(parsed.error).fieldErrors as Record<string, string[]>);
+    const v = parsed.data;
+    const admin = createAdminClient();
+    const { ref, externalId } = vintedSaleExternalId(v);
+    const { data: existing } = await admin.from("orders").select("id").eq("external_order_id", externalId).maybeSingle();
+    if (existing) {
+      if (ref) return fail(`Vinted order ${v.reference} has already been added.`, { reference: ["Already added"] });
+      return ok({ id: existing.id }, "Vinted sale added"); // same form submitted twice
+    }
+    const productIds = v.items.map((i) => i.product_id).filter(Boolean);
+    const { data: products } = productIds.length ? await admin.from("products").select("id, name, sku").in("id", productIds) : { data: [] };
+    const { data: settings } = await admin.from("business_settings").select("default_dispatch_days").maybeSingle();
+    const sale = buildVintedSale(v, products ?? [], settings?.default_dispatch_days ?? 3);
+    if (sale.missingTitle >= 0) return fail("Give each item a name or choose a product", { [`items.${sale.missingTitle}.title`]: ["Enter the item"] });
+
+    const { error } = await admin.rpc("ingest_marketplace_order", {
+      p_source: "vinted",
+      p_order: sale.order as unknown as Json,
+      p_items: sale.items as unknown as Json,
+      p_actor_label: `${user.fullName || user.email} (added from Vinted app)`,
+      p_force: false,
+    });
+    if (error) return fail(dbErrorMessage(error));
+    const { data: created } = await admin.from("orders").select("id").eq("external_order_id", externalId).single();
+    revalidateOrder();
+    revalidatePath("/production");
+    return ok({ id: created!.id }, sale.shipped ? "Vinted sale added (completed)" : "Vinted sale added — it’s on the Production Board");
   } catch (e) {
     return handle(e);
   }

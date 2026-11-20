@@ -66,9 +66,14 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
               <RefreshCw /> Sync status
             </ButtonLink>
             {hasRole(user, "staff") ? (
-              <ButtonLink href="/orders/new">
-                <Plus /> Manual order
-              </ButtonLink>
+              <>
+                <ButtonLink href="/orders/new/vinted" variant="outline">
+                  <Plus /> Vinted sale
+                </ButtonLink>
+                <ButtonLink href="/orders/new">
+                  <Plus /> Manual order
+                </ButtonLink>
+              </>
             ) : null}
           </>
         }
