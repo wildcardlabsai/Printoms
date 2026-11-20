@@ -133,6 +133,11 @@ export async function getOrderViewCounts() {
   };
 }
 
+/**
+ * One order with everything the detail page shows. If the database hasn't had
+ * the fees update yet, the order still loads (without fees) and
+ * `database_update_needed` is set, instead of the whole page failing.
+ */
 export async function getOrder(id: string) {
   const supabase = await createClient();
   const { data: order, error } = await supabase
@@ -153,8 +158,29 @@ export async function getOrder(id: string) {
     .order("created_at", { referencedTable: "shipments", ascending: false })
     .order("detected_at", { referencedTable: "order_reviews", ascending: false })
     .maybeSingle();
-  if (error) throw new Error(error.message);
-  return order;
+  if (!error) return order ? { ...order, database_update_needed: false } : null;
+  if (!/order_fees/i.test(`${error.message} ${error.details ?? ""} ${error.hint ?? ""}`)) throw new Error(error.message);
+
+  // Fees table not there yet (database update not run): load without fees.
+  const fallback = await supabase
+    .from("orders")
+    .select(
+      `*,
+       customer:customers(id, display_name, email, phone),
+       order_items(*, product:products(id, name, sku, image_path, material, default_colour),
+         production_jobs(id, job_number, stage, priority, printer_id, quantity, attempt_count, failed_attempts,
+           estimated_print_minutes, material, colour, notes, cancelled_at, cancellation_reason,
+           quantity_printed, quantity_pending, quantity_surplus, printer:printers!production_jobs_printer_id_fkey(id, name))),
+       shipments(*),
+       order_reviews(*, resolved_by_profile:profiles(full_name, email))`,
+    )
+    .eq("id", id)
+    .order("created_at", { referencedTable: "order_items", ascending: true })
+    .order("created_at", { referencedTable: "shipments", ascending: false })
+    .order("detected_at", { referencedTable: "order_reviews", ascending: false })
+    .maybeSingle();
+  if (fallback.error) throw new Error(fallback.error.message);
+  return fallback.data ? { ...fallback.data, order_fees: [] as NonNullable<typeof order>["order_fees"], database_update_needed: true } : null;
 }
 
 export type OrderDetail = NonNullable<Awaited<ReturnType<typeof getOrder>>>;

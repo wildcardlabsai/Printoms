@@ -116,6 +116,11 @@ export default async function OrderDetailPage({ params }: { params: Promise<{ id
         </div>
       </div>
 
+      {order.database_update_needed ? (
+        <Notice tone="warning" icon={<ShieldAlert />} title="Database update needed" className="mb-5">
+          Marketplace fees can’t be shown until the latest database update has been run in Supabase (SQL Editor). Everything else on this order works normally.
+        </Notice>
+      ) : null}
       {overdue ? (
         <Notice tone="danger" icon={<CalendarClock />} title="This order is overdue" className="mb-5">
           The dispatch deadline was {formatDate(order.dispatch_by)} ({formatRelative(order.dispatch_by)}).
